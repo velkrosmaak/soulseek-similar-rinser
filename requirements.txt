@@ -1,3 +1,4 @@
+mutagen>=1.47.0
 requests==2.33.0
 slskd-api==0.2.3
 typing-extensions>=4.0.0

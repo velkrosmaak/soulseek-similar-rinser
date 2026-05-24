@@ -10,6 +10,7 @@ import re
 import time
 from collections import Counter
 from config import create_slskd_client
+from mutagen import File as MutagenFile
 
 # search for alternatives for stuck or just queued downloads
 
@@ -53,6 +54,83 @@ GENERIC_PATH_PARTS = {
 
 def normalize_path(path):
     return (path or "").replace("\\", "/")
+
+
+def collect_local_files(directory):
+    files = []
+    for file_info in directory.get("files", []) or []:
+        files.append(file_info)
+    for subdirectory in directory.get("directories", []) or []:
+        files.extend(collect_local_files(subdirectory))
+    return files
+
+
+def build_local_file_index(client):
+    index = {}
+
+    for fetch_dir in (client.files.get_downloads_dir, client.files.get_incomplete_dir):
+        try:
+            root = fetch_dir(recursive=True)
+        except Exception:
+            continue
+
+        for local_file in collect_local_files(root):
+            basename = os.path.basename(local_file.get("fullname") or local_file.get("name") or "")
+            if not basename:
+                continue
+            index.setdefault(basename, []).append(local_file)
+
+    return index
+
+
+def resolve_local_file(file_info, local_file_index):
+    basename = os.path.basename(normalize_path(file_info.get("filename")))
+    size = file_info.get("size")
+    matches = local_file_index.get(basename, [])
+    if not matches:
+        return None
+
+    if size is not None:
+        sized_matches = [match for match in matches if match.get("length") == size]
+        if sized_matches:
+            return sized_matches[0]
+
+    return matches[0]
+
+
+def read_album_context_from_tags(file_info, local_file_index):
+    local_file = resolve_local_file(file_info, local_file_index)
+    if not local_file:
+        raise FileNotFoundError("matching local file not found")
+
+    local_path = local_file.get("fullname")
+    if not local_path:
+        raise FileNotFoundError("local file has no fullname")
+
+    tags = MutagenFile(local_path, easy=True)
+    if not tags:
+        raise ValueError("mutagen could not read tags")
+
+    artist_values = tags.get("albumartist") or tags.get("artist") or []
+    album_values = tags.get("album") or []
+    artist = artist_values[0].strip() if artist_values else ""
+    album = album_values[0].strip() if album_values else ""
+
+    if not artist or not album:
+        raise ValueError("artist/album tags missing")
+
+    search_text = album
+    if artist.lower() not in album.lower():
+        search_text = f"{artist} {album}"
+
+    return {
+        "album": album,
+        "artist": artist,
+        "search_text": search_text,
+        "album_key": f"{artist.lower()}::{album.lower()}",
+        "track_name": os.path.basename(normalize_path(file_info.get("filename"))),
+        "source": local_path,
+    }
 
 
 def infer_album_context(file_info):
@@ -230,6 +308,7 @@ def main():
     try:
         client = create_slskd_client()
         all_transfers = client.transfers.get_all_downloads()
+        local_file_index = build_local_file_index(client)
 
         if isinstance(all_transfers, dict):
             transfers_list = list(all_transfers.values())
@@ -280,7 +359,18 @@ def main():
                             f"{Color.RED}❌ Failed to retry file {f.get('id', 'unknown')}: "
                             f"{retry_err}{Color.END}"
                         )
-                        context = infer_album_context(f)
+                        try:
+                            context = read_album_context_from_tags(f, local_file_index)
+                            logger.info(
+                                f"{Color.DARKCYAN}Debug: tag context from {context['source']} "
+                                f"artist={context['artist']} album={context['album']}{Color.END}"
+                            )
+                        except Exception as tag_err:
+                            logger.warning(
+                                f"{Color.YELLOW}⚠️ Tag lookup failed for {filename}: "
+                                f"{tag_err}. Falling back to path inference.{Color.END}"
+                            )
+                            context = infer_album_context(f)
                         if context["album_key"] in searched_album_keys:
                             logger.info(
                                 f"{Color.DARKCYAN}Debug: fallback search already attempted "
