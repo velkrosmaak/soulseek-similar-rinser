@@ -9,6 +9,8 @@ import os
 from collections import Counter
 from config import create_slskd_client
 
+# search for alternatives for stuck or just queued downloads
+
 # Setup logging
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(SCRIPT_DIR, "retry_cron.log")
