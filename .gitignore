@@ -1,0 +1,7 @@
+/.venv
+/__pycache__
+/config.py
+/proxmox.bristolhouse+1-key.pem
+/proxmox.bristolhouse+1.pem
+/retry_cron.log
+/retry_machine.py
