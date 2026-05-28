@@ -4,6 +4,7 @@ soulseek-similar-rinser/retry_cron.py
 Automated retry script for failed or stuck slskd downloads.
 """
 
+import argparse
 import logging
 import os
 import re
@@ -275,6 +276,25 @@ def enqueue_album_match(client, match):
     ]
     return client.transfers.enqueue(username=match["username"], files=formatted_files)
 
+
+def enqueue_album_match_spread(client, match, used_usernames):
+    """Enqueue a replacement album while avoiding overloading a single user."""
+    username = match["username"]
+
+    if username in used_usernames:
+        return False
+
+    formatted_files = [
+        {"filename": f.get("filename"), "size": f.get("size")}
+        for f in match["files"]
+    ]
+
+    enqueued = client.transfers.enqueue(username=username, files=formatted_files)
+    if enqueued:
+        used_usernames.add(username)
+
+    return enqueued
+
 def retry_download(client, username, file_info):
     """Retry a download using the best available API for this slskd client."""
     file_id = file_info.get("id")
@@ -303,6 +323,19 @@ def retry_download(client, username, file_info):
     return "cancel+enqueue"
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Retry or replace stuck slskd downloads"
+    )
+    parser.add_argument(
+        "--search-only",
+        action="store_true",
+        help=(
+            "Do not retry existing downloads. Instead search for replacement albums "
+            "with free upload slots and spread downloads across different users."
+        ),
+    )
+    args = parser.parse_args()
+
     logger.info(f"{Color.BOLD}{Color.CYAN}Starting slskd maintenance check...{Color.END}")
 
     try:
@@ -329,6 +362,7 @@ def main():
         fallback_search_count = 0
         fallback_enqueued_count = 0
         total_files = 0
+        replacement_users_used = set()
         retry_candidates = 0
         state_counts = Counter()
         searched_album_keys = set()
@@ -350,8 +384,30 @@ def main():
 
                 if should_retry(raw_state):
                     retry_candidates += 1
-                    logger.info(f"{Color.YELLOW}🔄 Retrying: {filename} (User: {username}, State: {raw_state}){Color.END}")
+
+                    if args.search_only:
+                        try:
+                            context = read_album_context_from_tags(f, local_file_index)
+                        except Exception:
+                            context = infer_album_context(f)
+
+                        if context["album_key"] in searched_album_keys:
+                            logger.info(
+                                f"{Color.DARKCYAN}Debug: already searched album "
+                                f"{context['artist']} - {context['album']}, skipping track {filename}{Color.END}"
+                            )
+                            continue
+
+                    action_text = "Searching alternative for" if args.search_only else "Retrying"
+                    logger.info(
+                        f"{Color.YELLOW}🔄 {action_text}: {filename} "
+                        f"(User: {username}, State: {raw_state}){Color.END}"
+                    )
+
                     try:
+                        if args.search_only:
+                            raise RuntimeError("search-only mode enabled")
+
                         retry_method = retry_download(client, username, f)
                         retried_count += 1
                     except Exception as retry_err:
@@ -372,10 +428,6 @@ def main():
                             )
                             context = infer_album_context(f)
                         if context["album_key"] in searched_album_keys:
-                            logger.info(
-                                f"{Color.DARKCYAN}Debug: fallback search already attempted "
-                                f"for {context['album']}{Color.END}"
-                            )
                             continue
 
                         searched_album_keys.add(context["album_key"])
@@ -398,17 +450,29 @@ def main():
                                 )
                                 continue
 
-                            enqueued = enqueue_album_match(client, match)
+                            enqueued = enqueue_album_match_spread(
+                                client,
+                                match,
+                                replacement_users_used,
+                            )
+
                             if not enqueued:
-                                raise RuntimeError("enqueue returned false")
+                                logger.warning(
+                                    f"{Color.YELLOW}⚠️ Skipping {match['username']} because "
+                                    f"an album is already queued from that user.{Color.END}"
+                                )
+                                continue
 
                             fallback_enqueued_count += 1
                             quality = "Lossless" if match["is_lossless"] else f"{match['bitrate']}kbps"
+                            free_slot_text = "yes" if match["has_free_slot"] else "no"
+
                             logger.info(
                                 f"{Color.GREEN}📦 Fallback enqueued: {context['artist']} - "
                                 f"{context['album']} from {match['username']} "
-                                f"(queue={match['queue_length']}, quality={quality}, "
-                                f"tracks={match['track_count']}, min={min_tracks}){Color.END}"
+                                f"(free_slot={free_slot_text}, queue={match['queue_length']}, "
+                                f"quality={quality}, tracks={match['track_count']}, "
+                                f"min={min_tracks}){Color.END}"
                             )
                         except Exception as search_err:
                             logger.error(
@@ -432,7 +496,13 @@ def main():
             f"{fallback_enqueued_count} fallback enqueues. States: {top_states}{Color.END}"
         )
 
-        if retried_count > 0:
+        if args.search_only:
+            logger.info(
+                f"{Color.GREEN}✅ Search-only mode complete. "
+                f"Queued {fallback_enqueued_count} replacement albums "
+                f"across {len(replacement_users_used)} users.{Color.END}"
+            )
+        elif retried_count > 0:
             logger.info(f"{Color.GREEN}✅ Successfully triggered {retried_count} retries.{Color.END}")
         else:
             logger.info("Nothing to retry.")

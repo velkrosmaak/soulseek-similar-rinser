@@ -181,7 +181,7 @@ def get_expected_track_count(artist: str, album: str) -> int:
         print(f"    {Color.YELLOW}[⚠️ DEBUG] MusicBrainz track lookup failed: {e}{Color.END}")
     return 0
 
-def trigger_slskd_search(artist: str, album: str):
+def trigger_slskd_search(artist: str, album: str, used_users: set):
     """Search and download the best quality album with free slots."""
     try:
         expected_tracks = get_expected_track_count(artist, album)
@@ -228,8 +228,14 @@ def trigger_slskd_search(artist: str, album: str):
                         })
 
                     if candidates:
-                        candidates.sort(key=lambda x: x["score"], reverse=True)
-                        best_response = next((c for c in candidates if c["track_count"] >= min_tracks), None)
+                        # Prefer users we haven't used yet in this run
+                        fresh = [c for c in candidates if c["username"] not in used_users]
+                        reused = [c for c in candidates if c["username"] in used_users]
+
+                        ordered = fresh + reused
+                        ordered.sort(key=lambda x: x["score"], reverse=True)
+
+                        best_response = next((c for c in ordered if c["track_count"] >= min_tracks), None)
                         if best_response and best_response["score"][0] and best_response["score"][1]:
                             break
 
@@ -252,6 +258,7 @@ def trigger_slskd_search(artist: str, album: str):
                 print(f"    {Color.DARKCYAN}[🎯 DEBUG] Picking: User={best_response['username']}, Slots={score[0]}, Quality={q_desc}{Color.END}")
                 formatted_files = [{"filename": f.get("filename"), "size": f.get("size")} for f in best_response["files"]]
                 slskd_client.transfers.enqueue(username=best_response["username"], files=formatted_files)
+                used_users.add(best_response["username"])
                 print(f"    {Color.PURPLE}📦 [slskd] Download started.{Color.END}")
             else:
                 print(f"    {Color.YELLOW}⚠️ No suitable results found.{Color.END}")
@@ -282,11 +289,13 @@ def main():
     parser.add_argument("compilation", help="Series name (e.g., 'Fabric', 'Back to Mine')")
     parser.add_argument("--download", action="store_true", help="Trigger downloads")
     args = parser.parse_args()
+    used_users = set()
 
     retry_failed_downloads()
 
     releases = get_compilation_releases(args.compilation)
-    
+    # print(releases)
+    # print("------------------------------------------------")
     if not releases:
         print(f"{Color.RED}No releases found for '{args.compilation}'.{Color.END}")
         return
@@ -306,7 +315,7 @@ def main():
         else:
             print(f"    {Color.YELLOW}❌ [Plex] Missing.{Color.END}")
             if args.download:
-                trigger_slskd_search(artist, title)
+                trigger_slskd_search(artist, title, used_users)
 
 if __name__ == "__main__":
     main()
