@@ -238,7 +238,7 @@ def trigger_slskd_track_search(idx: int, artist: str, track: str, remix: str, us
                     except (ValueError, TypeError):
                         pass
 
-                payload = {"files": [file_obj]}
+                payload = [file_obj]
                 params = {"destination": destination}
 
                 try:

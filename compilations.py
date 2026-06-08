@@ -256,14 +256,22 @@ def trigger_slskd_search(artist: str, album: str, used_users: set, destination: 
                 score = best_response["score"]
                 q_desc = "Lossless" if score[4] else f"{score[3]}kbps"
                 print(f"    {Color.DARKCYAN}[🎯 DEBUG] Picking: User={best_response['username']}, Slots={score[0]}, Quality={q_desc}{Color.END}")
-                formatted_files = [{"filename": f.get("filename"), "size": f.get("size")} for f in best_response["files"]]
+                formatted_files = []
+                for f in best_response["files"]:
+                    file_item = {"filename": f.get("filename")}
+                    if f.get("size") is not None:
+                        try:
+                            file_item["size"] = int(f.get("size"))
+                        except (ValueError, TypeError):
+                            pass
+                    formatted_files.append(file_item)
 
                 if destination:
                     user = best_response["username"]
                     encoded_user = requests.utils.quote(user)
                     enqueue_url = f"{SLSKD_URL.rstrip('/')}/api/v0/transfers/downloads/{encoded_user}"
                     headers = {"X-API-Key": SLSKD_API_KEY, "Content-Type": "application/json"}
-                    payload = {"files": formatted_files}
+                    payload = formatted_files
                     params = {"destination": destination}
 
                     try:
