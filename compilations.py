@@ -15,7 +15,7 @@ import tty
 import termios
 from tqdm import tqdm
 
-from config import PLEX_TOKEN, PLEX_URL, create_slskd_client
+from config import PLEX_TOKEN, PLEX_URL, SLSKD_API_KEY, SLSKD_URL, create_slskd_client
 
 slskd_client = create_slskd_client()
 
@@ -181,7 +181,7 @@ def get_expected_track_count(artist: str, album: str) -> int:
         print(f"    {Color.YELLOW}[⚠️ DEBUG] MusicBrainz track lookup failed: {e}{Color.END}")
     return 0
 
-def trigger_slskd_search(artist: str, album: str, used_users: set):
+def trigger_slskd_search(artist: str, album: str, used_users: set, destination: str = None):
     """Search and download the best quality album with free slots."""
     try:
         expected_tracks = get_expected_track_count(artist, album)
@@ -257,9 +257,30 @@ def trigger_slskd_search(artist: str, album: str, used_users: set):
                 q_desc = "Lossless" if score[4] else f"{score[3]}kbps"
                 print(f"    {Color.DARKCYAN}[🎯 DEBUG] Picking: User={best_response['username']}, Slots={score[0]}, Quality={q_desc}{Color.END}")
                 formatted_files = [{"filename": f.get("filename"), "size": f.get("size")} for f in best_response["files"]]
-                slskd_client.transfers.enqueue(username=best_response["username"], files=formatted_files)
+
+                if destination:
+                    user = best_response["username"]
+                    encoded_user = requests.utils.quote(user)
+                    enqueue_url = f"{SLSKD_URL.rstrip('/')}/api/v0/transfers/downloads/{encoded_user}"
+                    headers = {"X-API-Key": SLSKD_API_KEY, "Content-Type": "application/json"}
+                    payload = {"files": formatted_files}
+                    params = {"destination": destination}
+
+                    try:
+                        response = requests.post(enqueue_url, json=payload, params=params, headers=headers, timeout=10)
+                        if response.status_code >= 400:
+                            print(f"    {Color.YELLOW}⚠️ [slskd] Custom enqueue failed ({response.status_code}). Falling back...{Color.END}")
+                            slskd_client.transfers.enqueue(username=user, files=formatted_files)
+                        else:
+                            print(f"    {Color.PURPLE}📦 [slskd] Download started into: {destination}{Color.END}")
+                    except Exception as e:
+                        print(f"    {Color.YELLOW}⚠️ [slskd] Custom request error: {e}. Falling back...{Color.END}")
+                        slskd_client.transfers.enqueue(username=user, files=formatted_files)
+                else:
+                    slskd_client.transfers.enqueue(username=best_response["username"], files=formatted_files)
+                    print(f"    {Color.PURPLE}📦 [slskd] Download started.{Color.END}")
+
                 used_users.add(best_response["username"])
-                print(f"    {Color.PURPLE}📦 [slskd] Download started.{Color.END}")
             else:
                 print(f"    {Color.YELLOW}⚠️ No suitable results found.{Color.END}")
         finally:
@@ -302,6 +323,8 @@ def main():
 
     print(f"\n{Color.BOLD}{Color.CYAN}🚀 Processing {len(releases)} albums from the '{args.compilation}' series...{Color.END}\n")
     print("=" * 60)
+    destination = f"Compilations/{args.compilation}"
+    print(f"    {Color.DARKCYAN}📂 Subdirectory: {destination}{Color.END}\n")
 
     for i, rel in enumerate(releases, 1):
         artist = rel['artist']
@@ -315,7 +338,7 @@ def main():
         else:
             print(f"    {Color.YELLOW}❌ [Plex] Missing.{Color.END}")
             if args.download:
-                trigger_slskd_search(artist, title, used_users)
+                trigger_slskd_search(artist, title, used_users, destination=destination)
 
 if __name__ == "__main__":
     main()
