@@ -224,31 +224,25 @@ def trigger_slskd_track_search(idx: int, artist: str, track: str, remix: str, us
             if best_response:
                 user = best_response["username"]
                 f = best_response["file"]
-                # URL encode the username to handle spaces/symbols
-                encoded_user = requests.utils.quote(user)
                 
-                enqueue_url = f"{SLSKD_URL.rstrip('/')}/api/v0/transfers/downloads/{encoded_user}"
+                enqueue_url = f"{SLSKD_URL.rstrip('/')}/api/v0/transfers/downloads/{user}"
                 headers = {"X-API-Key": SLSKD_API_KEY, "Content-Type": "application/json"}
                 
-                # Build file object safely: ensure size is an int and omit if None
-                file_obj = {"filename": f.get("filename")}
-                if f.get("size") is not None:
-                    try:
-                        file_obj["size"] = int(f.get("size"))
-                    except (ValueError, TypeError):
-                        pass
+                # Build file object: size must be an integer
+                file_obj = {
+                    "filename": f.get("filename"),
+                    "size": int(f.get("size") or 0)
+                }
 
-                payload = [file_obj]
+                payload = [file_obj] # API expects a list/array
                 params = {"destination": destination}
 
                 try:
-                    # Attempt with destination via query parameter
+                    # Post to API with destination as query parameter
                     response = requests.post(enqueue_url, json=payload, params=params, headers=headers, timeout=10)
                     if response.status_code >= 400:
-                        print(f"    {track_tag} {Color.YELLOW}⚠️ Custom enqueue failed (Status {response.status_code}). Falling back to default dir...{Color.END}")
-                        slskd_client.transfers.enqueue(username=user, files=[file_obj])
-                    else:
-                        print(f"    {track_tag} {Color.PURPLE}📦 Enqueued from {user} into '{destination}' ({f.get('bitRate')}kbps){Color.END}")
+                        raise RuntimeError(f"API returned {response.status_code}")
+                    print(f"    {track_tag} {Color.PURPLE}📦 Enqueued from {user} into '{destination}' ({f.get('bitRate')}kbps){Color.END}")
                 except Exception as e:
                     print(f"    {track_tag} {Color.YELLOW}⚠️ Request error: {e}. Falling back to default dir...{Color.END}")
                     slskd_client.transfers.enqueue(username=user, files=[file_obj])
