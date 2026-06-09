@@ -224,28 +224,26 @@ def trigger_slskd_track_search(idx: int, artist: str, track: str, remix: str, us
             if best_response:
                 user = best_response["username"]
                 f = best_response["file"]
-                
-                enqueue_url = f"{SLSKD_URL.rstrip('/')}/api/v0/transfers/downloads/{user}"
+
+                # Use the global enqueue endpoint for reliable subdirectory support
+                enqueue_url = f"{SLSKD_URL.rstrip('/')}/api/v0/transfers/enqueue"
                 headers = {"X-API-Key": SLSKD_API_KEY, "Content-Type": "application/json"}
                 
-                # Build file object: size must be an integer
-                file_obj = {
-                    "filename": f.get("filename"),
-                    "size": int(f.get("size") or 0)
+                payload = {
+                    "username": user,
+                    "files": [{"filename": f.get("filename"), "size": int(f.get("size") or 0)}],
+                    "destination": destination
                 }
 
-                payload = [file_obj] # API expects a list/array
-                params = {"destination": destination}
-
                 try:
-                    # Post to API with destination as query parameter
-                    response = requests.post(enqueue_url, json=payload, params=params, headers=headers, timeout=10)
+                    # Global enqueue respects the 'destination' field in the JSON body
+                    response = requests.post(enqueue_url, json=payload, headers=headers, timeout=10)
                     if response.status_code >= 400:
                         raise RuntimeError(f"API returned {response.status_code}")
                     print(f"    {track_tag} {Color.PURPLE}📦 Enqueued from {user} into '{destination}' ({f.get('bitRate')}kbps){Color.END}")
                 except Exception as e:
                     print(f"    {track_tag} {Color.YELLOW}⚠️ Request error: {e}. Falling back to default dir...{Color.END}")
-                    slskd_client.transfers.enqueue(username=user, files=[file_obj])
+                    slskd_client.transfers.enqueue(username=user, files=[{"filename": f.get("filename"), "size": int(f.get("size") or 0)}])
                 used_users.add(user)
             else:
                 print(f"    {track_tag} {Color.YELLOW}⚠️ No suitable results found.{Color.END}")
