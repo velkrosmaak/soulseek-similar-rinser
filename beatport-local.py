@@ -153,8 +153,8 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> bool
         "sockseek",
         query,
         "-p", dest_path,
-        "--user", "velkrosmaak3",
-        "--pass", "1Ndustry"
+        "--user", "<YOURUSERNAME>",
+        "--pass", "<YOURPASS>"
     ]
 
     print(f"    {Color.CYAN}🚀 Running sockseek: {query}{Color.END}")
