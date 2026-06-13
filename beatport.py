@@ -14,6 +14,7 @@ import termios
 import time
 import tty
 import requests
+import sqlite3
 from tqdm import tqdm
 
 from config import PLEX_TOKEN, PLEX_URL, SLSKD_API_KEY, SLSKD_URL, create_slskd_client, _getenv
@@ -32,16 +33,74 @@ class Color:
     BOLD = '\033[1m'
     END = '\033[0m'
 
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "beatport_downloads.db")
+
+def init_db():
+    """Initialize the SQLite database for tracking downloads."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS downloads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            artist TEXT,
+            title TEXT,
+            remix TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def track_exists(artist: str, title: str, remix: str) -> bool:
+    """Check if a track has already been enqueued."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT 1 FROM downloads WHERE artist = ? AND title = ? AND remix = ?', (artist, title, remix))
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
+
+def add_to_db(artist: str, title: str, remix: str):
+    """Log an enqueued track to the database."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('INSERT INTO downloads (artist, title, remix) VALUES (?, ?, ?)', (artist, title, remix))
+    conn.commit()
+    conn.close()
+
+def get_db_stats() -> int:
+    """Get the total number of logged downloads."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM downloads')
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
 GENRE_MAP = {
+    "dnb": ("drum-bass", 1),
+    "electronica": ("electronica", 3),
     "house": ("house", 5),
     "techno": ("techno-peak-time-driving", 6),
+    "trance": ("trance", 7),
+    "hard-dance": ("hard-dance-hardcore-neo-rave", 8),
+    "breaks": ("breaks-breakbeat-uk-bass", 9),
     "tech-house": ("tech-house", 11),
     "deep-house": ("deep-house", 12),
-    "minimal": ("minimal-deep-tech", 75),
-    "dnb": ("drum-bass", 1),
-    "trance": ("trance", 7),
+    "psy-trance": ("psy-trance", 13),
+    "minimal": ("minimal-deep-tech", 14),
     "progressive": ("progressive-house", 15),
+    "dubstep": ("dubstep", 18),
+    "indie-dance": ("indie-dance", 37),
+    "trap": ("trap-future-bass", 38),
+    "dance-pop": ("dance-pop", 39),
+    "nu-disco": ("nu-disco-disco", 50),
+    "ukg": ("uk-garage-bassline", 86),
+    "afro-house": ("afro-house", 89),
     "melodic": ("melodic-house-techno", 90),
+    "bass-house": ("bass-house", 91),
+    "techno-raw": ("techno-raw-deep-hypnotic", 92),
+    "mainstage": ("mainstage", 96),
 }
 
 def check_skip(timeout: float = 0.0) -> bool:
@@ -140,7 +199,7 @@ def check_plex_for_track(artist: str, track: str) -> bool:
     except:
         return False
 
-def trigger_slskd_track_search(idx: int, artist: str, track: str, remix: str, used_users: set, destination: str):
+def trigger_slskd_track_search(idx: int, artist: str, track: str, remix: str, used_users: set, destination: str, require_free_slots: bool = False) -> bool:
     """Search and download the best quality track, spreading load across users."""
     track_tag = f"{Color.DARKCYAN}[{idx:03d}]{Color.END}"
     query = f"{artist} {track}"
@@ -221,43 +280,123 @@ def trigger_slskd_track_search(idx: int, artist: str, track: str, remix: str, us
 
             print("\r" + " " * 80 + "\r", end="", flush=True)
 
+            enqueued = False
             if best_response:
+                if require_free_slots and not best_response["score"][1]:
+                    # During optimization, we only care if we found someone with a free slot
+                    return False
+
                 user = best_response["username"]
                 f = best_response["file"]
 
-                # Use the global enqueue endpoint for reliable subdirectory support
-                enqueue_url = f"{SLSKD_URL.rstrip('/')}/api/v0/transfers/enqueue"
+                # Use the user-specific endpoint for reliable subdirectory support
+                enqueue_url = f"{SLSKD_URL.rstrip('/')}/api/v0/transfers/downloads/{user}"
                 headers = {"X-API-Key": SLSKD_API_KEY, "Content-Type": "application/json"}
                 
                 payload = {
-                    "username": user,
                     "files": [{"filename": f.get("filename"), "size": int(f.get("size") or 0)}],
                     "destination": destination
                 }
 
                 try:
-                    # Global enqueue respects the 'destination' field in the JSON body
-                    response = requests.post(enqueue_url, json=payload, headers=headers, timeout=10)
+                    # Enqueue respects the 'destination' field in the JSON body
+                    response = requests.post(enqueue_url, json=payload, headers=headers, timeout=30)
                     if response.status_code >= 400:
                         raise RuntimeError(f"API returned {response.status_code}")
                     print(f"    {track_tag} {Color.PURPLE}📦 Enqueued from {user} into '{destination}' ({f.get('bitRate')}kbps){Color.END}")
+                    enqueued = True
                 except Exception as e:
                     print(f"    {track_tag} {Color.YELLOW}⚠️ Request error: {e}. Falling back to default dir...{Color.END}")
                     slskd_client.transfers.enqueue(username=user, files=[{"filename": f.get("filename"), "size": int(f.get("size") or 0)}])
+                    enqueued = True
                 used_users.add(user)
             else:
                 print(f"    {track_tag} {Color.YELLOW}⚠️ No suitable results found.{Color.END}")
+            return enqueued
         finally:
             slskd_client.searches.delete(id=search_id)
     except Exception as e:
         print(f"    {track_tag} {Color.RED}❌ Search failed: {e}{Color.END}")
+        return False
+
+def optimize_queued_downloads(destination: str, used_users: set, enqueued_metadata: list):
+    """
+    Look for downloads that are remotely queued and try to find a source with no queue.
+    """
+    print(f"\n{Color.BOLD}{Color.CYAN}🔍 Checking for remotely queued tracks to optimize...{Color.END}")
+    
+    try:
+        all_transfers = slskd_client.transfers.get_all_downloads()
+        if not all_transfers:
+            return
+
+        queued_items = []
+        for transfer in all_transfers:
+            username = transfer.get("username")
+            if not username: continue
+
+            for f in transfer.get("files", []):
+                state = str(f.get("state", "")).strip()
+                if "Queued, Remotely" in state:
+                    # Try to match this file back to our metadata list by looking at the path
+                    # Beatport downloads are typically 'Artist - Title (Remix).ext'
+                    filename = (f.get("filename") or "").lower()
+                    
+                    match = None
+                    for m in enqueued_metadata:
+                        # Heuristic: both artist and title should be in the file path
+                        if m['artist'].lower() in filename and m['title'].lower() in filename:
+                            match = m
+                            break
+                    
+                    if match:
+                        queued_items.append({
+                            "username": username,
+                            "file_id": f.get("id"),
+                            "metadata": match
+                        })
+
+        if not queued_items:
+            print(f"    {Color.GREEN}✅ No remotely queued tracks found for optimization.{Color.END}")
+            return
+
+        print(f"    {Color.YELLOW}⏳ Found {len(queued_items)} queued tracks. Attempting to find immediate sources...{Color.END}")
+
+        for item in queued_items:
+            m = item["metadata"]
+            old_user = item["username"]
+            file_id = item["file_id"]
+            
+            track_tag = f"{Color.DARKCYAN}[{m['idx']:03d} OPT]{Color.END}"
+            print(f"  {track_tag} {Color.CYAN}🔄 Re-searching for better source: {m['artist']} - {m['title']}{Color.END}")
+            
+            # Penalize the user who currently has the file queued
+            temp_used = used_users.copy()
+            temp_used.add(old_user)
+            
+            # require_free_slots=True ensures we only swap if we find someone with no queue
+            if trigger_slskd_track_search(m['idx'], m['artist'], m['title'], m['remix'], temp_used, destination, require_free_slots=True):
+                print(f"    {track_tag} {Color.GREEN}🚀 Found immediate source! Canceling queued download from {old_user}.{Color.END}")
+                try:
+                    slskd_client.transfers.cancel_download(username=old_user, id=file_id, remove=True)
+                except: pass
+
+    except Exception as e:
+        print(f"    {Color.RED}❌ Optimization check failed: {e}{Color.END}")
 
 def main():
     parser = argparse.ArgumentParser(description="Download Beatport Top 100 tracks.")
     parser.add_argument("genre", help=f"Genre key ({', '.join(GENRE_MAP.keys())})")
     parser.add_argument("--download", action="store_true", help="Trigger downloads")
     args = parser.parse_args()
+
+    if not SLSKD_API_KEY or SLSKD_API_KEY == "your slskd api key":
+        print(f"{Color.RED}Error: Please set your SLSKD_API_KEY environment variable or update config.py with your API key.{Color.END}")
+        sys.exit(1)
+
+    init_db()
     used_users = set()
+    enqueued_metadata = []
 
     tracks = get_beatport_top_100(args.genre)
     if not tracks:
@@ -266,19 +405,32 @@ def main():
     print(f"\n{Color.BOLD}{Color.CYAN}🚀 Processing Top 100 for {args.genre}...{Color.END}\n")
     destination = f"Beatport Top 100 {args.genre}"
     print(f"    {Color.DARKCYAN}📂 Subdirectory: {destination}{Color.END}\n")
+    print(f"    {Color.DARKCYAN}📊 Database stats: {get_db_stats()} tracks previously downloaded.{Color.END}\n")
     
     for i, t in enumerate(tracks, 1):
         artist, title, remix = t['artist'], t['title'], t['remix']
         track_tag = f"{Color.DARKCYAN}[{i:03d}]{Color.END}"
         
+        if track_exists(artist, title, remix):
+            print(f"  {track_tag} {Color.BLUE}💾 {artist} - {title} (Already in DB){Color.END}")
+            continue
+
         exists = check_plex_for_track(artist, title)
         if exists:
             print(f"  {track_tag} {Color.GREEN}✅ {artist} - {title}{Color.END}")
         else:
             if args.download:
-                trigger_slskd_track_search(i, artist, title, remix, used_users, destination)
+                if trigger_slskd_track_search(i, artist, title, remix, used_users, destination):
+                    enqueued_metadata.append({'idx': i, 'artist': artist, 'title': title, 'remix': remix})
+                    add_to_db(artist, title, remix)
             else:
                 print(f"  {track_tag} {Color.YELLOW}❌ {artist} - {title} (Missing){Color.END}")
+
+    # Post-process: try to find better sources for things that got queued
+    if args.download and enqueued_metadata:
+        # Brief sleep to allow slskd to update transfer states
+        time.sleep(2)
+        optimize_queued_downloads(destination, used_users, enqueued_metadata)
 
     print(f"\n{Color.BOLD}{Color.GREEN}✅ All tracks processed.{Color.END}")
 
