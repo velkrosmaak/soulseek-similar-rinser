@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import select
 import time
 import requests
 import sqlite3
@@ -31,6 +32,7 @@ class Color:
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "beatport_downloads.db")
 QUEUED_TIMEOUT = 60  # Seconds to wait if remotely queued before giving up
+STALL_TIMEOUT = 120  # Seconds of "dead air" (no output/progress) before assuming stuck
 
 def init_db():
     """Initialize the SQLite database for tracking downloads."""
@@ -175,31 +177,53 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> bool
         )
 
         queued_start_time = None
-        
-        while True:
-            line = process.stdout.readline()
-            if not line and process.poll() is not None:
-                break
-            
-            if line:
-                clean_line = line.strip()
-                # Print all sockseek output in real time
-                print(f"      {Color.DARKCYAN}» {clean_line}{Color.END}")
+        last_activity = time.time()
+        buffer = ""
 
-                # Check for remote queue status
-                if "queued" in clean_line.lower() or "remotely queued" in clean_line.lower():
-                    if queued_start_time is None:
-                        queued_start_time = time.time()
-                    
-                    elapsed = time.time() - queued_start_time
-                    if elapsed > QUEUED_TIMEOUT:
-                        print(f"    {Color.RED}⏱️ Track queued for too long ({int(elapsed)}s). Canceling...{Color.END}")
-                        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                        return False
+        while True:
+            # Use select to check for data with a 1-second timeout
+            rlist, _, _ = select.select([process.stdout], [], [], 1.0)
+
+            if rlist:
+                # Read character by character to catch \r progress updates
+                char = process.stdout.read(1)
+                if not char:
+                    break
+
+                last_activity = time.time()
+
+                if char in ['\n', '\r']:
+                    clean_line = buffer.strip()
+                    if clean_line:
+                        # Print the line, clearing trailing characters if it's a \r update
+                        sys.stdout.write(f"\r      {Color.DARKCYAN}» {clean_line}{Color.END}          ")
+                        if char == '\n':
+                            sys.stdout.write('\n')
+                        sys.stdout.flush()
+
+                        lower_line = clean_line.lower()
+                        # Monitor Queue logic
+                        if "queued" in lower_line:
+                            if queued_start_time is None:
+                                queued_start_time = time.time()
+                            if time.time() - queued_start_time > QUEUED_TIMEOUT:
+                                print(f"\n    {Color.RED}⏱️ Queued for too long ({QUEUED_TIMEOUT}s). Canceling...{Color.END}")
+                                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                                return False
+                        elif "downloading" in lower_line:
+                            queued_start_time = None
+                    buffer = ""
                 else:
-                    # If we see downloading activity, reset the queue timer
-                    if "downloading" in clean_line.lower():
-                        queued_start_time = None
+                    buffer += char
+            else:
+                # No data received in the last second
+                if time.time() - last_activity > STALL_TIMEOUT:
+                    print(f"\n    {Color.RED}❌ Stall detected: No output for {STALL_TIMEOUT}s. Killing...{Color.END}")
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    return False
+                
+                if process.poll() is not None:
+                    break
 
         return process.returncode == 0
 
@@ -253,6 +277,9 @@ def main():
                 print(f"    {Color.RED}❌ Failed or Skipped.{Color.END}")
         else:
             print(f"  {track_tag} {Color.YELLOW}❌ {artist} - {title} (Missing){Color.END}")
+
+        # Brief sleep to let the OS release the listening port (49998)
+        time.sleep(2)
 
     print(f"\n{Color.BOLD}{Color.GREEN}✅ Processing complete.{Color.END}")
 
