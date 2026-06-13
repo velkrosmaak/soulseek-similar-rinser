@@ -183,9 +183,8 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> bool
             
             if line:
                 clean_line = line.strip()
-                # Print sockseek output for transparency
-                if any(kw in clean_line.lower() for kw in ["downloading", "queued", "search", "found"]):
-                    print(f"      {Color.DARKCYAN}» {clean_line}{Color.END}")
+                # Print all sockseek output in real time
+                print(f"      {Color.DARKCYAN}» {clean_line}{Color.END}")
 
                 # Check for remote queue status
                 if "queued" in clean_line.lower() or "remotely queued" in clean_line.lower():
