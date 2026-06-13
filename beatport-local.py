@@ -99,7 +99,13 @@ def get_beatport_top_100(genre_key: str) -> list[dict]:
         return []
 
     url = f"https://www.beatport.com/genre/{genre_name}/{genre_id}/top-100"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    print(f"{Color.DARKCYAN}[⚙️ DEBUG] Fetching Beatport Top 100 for {genre_name.title()}...{Color.END}")
     
     try:
         response = requests.get(url, headers=headers, timeout=15)
@@ -153,8 +159,8 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> bool
         "sockseek",
         query,
         "-p", dest_path,
-        "--user", "<YOURUSERNAME>",
-        "--pass", "<YOURPASS>"
+        "--user", "velkrosmaak3",
+        "--pass", "1Ndustry"
     ]
 
     print(f"    {Color.CYAN}🚀 Running sockseek: {query}{Color.END}")
