@@ -12,6 +12,7 @@ import sys
 import select
 import time
 import requests
+import threading
 import sqlite3
 import subprocess
 import signal
@@ -169,7 +170,26 @@ def check_plex_for_track(artist: str, track: str) -> bool:
         return False
     except: return False
 
-def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> tuple[bool, str | None]:
+def convert_to_mp3(file_path: str):
+    """Convert a file to 320kbps MP3 using ffmpeg if it's not already an MP3."""
+    if not file_path or not os.path.exists(file_path):
+        return
+    
+    base, ext = os.path.splitext(file_path)
+    if ext.lower() == '.mp3':
+        return
+
+    new_file = base + ".mp3"
+    print(f"\n      {Color.PURPLE}🔄 Converting {ext[1:].upper()} to 320kbps MP3...{Color.END}")
+    try:
+        cmd = ["ffmpeg", "-y", "-i", file_path, "-codec:a", "libmp3lame", "-b:a", "320k", new_file]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        os.remove(file_path)
+        print(f"      {Color.GREEN}✨ Conversion complete: {os.path.basename(new_file)}{Color.END}")
+    except Exception as e:
+        print(f"      {Color.RED}❌ Conversion failed: {e}{Color.END}")
+
+def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> tuple[bool, str | None, str | None]:
     """Run the local sockseek command and monitor for remote queues."""
     query = f"{artist} {title}"
     if remix and "original" not in remix.lower():
@@ -200,6 +220,7 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> tupl
         queued_start_time = None
         job_succeeded = False
         remote_user = None
+        downloaded_file_path = None
         last_activity = time.time()
         buffer = ""
 
@@ -227,6 +248,15 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> tupl
                         lower_line = clean_line.lower()
                         if "songjob: succeeded" in lower_line:
                             job_succeeded = True
+                            # Extract local path. Format: SongJob: succeeded: Query: User\Path\to\file.ext
+                            path_match = re.search(r"SongJob: succeeded:.*?: (.*)", clean_line)
+                            if path_match:
+                                rel_path = path_match.group(1).replace('\\', os.sep).replace('/', os.sep)
+                                downloaded_file_path = os.path.join(dest_path, rel_path)
+                                
+                                # Also update remote_user from this line if not already caught
+                                if not remote_user:
+                                    remote_user = rel_path.split(os.sep)[0]
 
                         # Try to extract username: [4] SongJob: status: Query: User\Path
                         if "songjob:" in lower_line:
@@ -242,7 +272,7 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> tupl
                             if time.time() - queued_start_time > QUEUED_TIMEOUT:
                                 print(f"\n    {Color.RED}⏱️ Queued for too long ({QUEUED_TIMEOUT}s). Canceling...{Color.END}")
                                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                                return False, remote_user
+                                return False, remote_user, None
                         elif "downloading" in lower_line:
                             queued_start_time = None
                     buffer = ""
@@ -253,16 +283,16 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> tupl
                 if time.time() - last_activity > STALL_TIMEOUT:
                     print(f"\n    {Color.RED}❌ Stall detected: No output for {STALL_TIMEOUT}s. Killing...{Color.END}")
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    return False, remote_user
+                    return False, remote_user, None
                 
                 if process.poll() is not None:
                     break
 
-        return (job_succeeded or process.returncode == 0), remote_user
+        return (job_succeeded or process.returncode == 0), remote_user, downloaded_file_path
 
     except Exception as e:
         print(f"    {Color.RED}❌ sockseek error: {e}{Color.END}")
-        return False, None
+        return False, None, None
 
 def main():
     parser = argparse.ArgumentParser(description="Download Beatport Top 100 via local sockseek.")
@@ -303,10 +333,13 @@ def main():
         # 3. Download
         if args.download:
             print(f"  {track_tag} {Color.YELLOW}🔍 {artist} - {title}{Color.END}")
-            success, r_user = run_sockseek(artist, title, remix, genre_display)
+            success, r_user, f_path = run_sockseek(artist, title, remix, genre_display)
             add_to_db(artist, title, remix, r_user, success)
             if success:
                 print(f"    {Color.PURPLE}📦 Finished (User: {r_user or 'Unknown'}).{Color.END}")
+                if f_path:
+                    # Start conversion in a separate thread so the next search can begin
+                    threading.Thread(target=convert_to_mp3, args=(f_path,), daemon=True).start()
             else:
                 print(f"    {Color.RED}❌ Failed or Skipped (User: {r_user or 'Unknown'}).{Color.END}")
         else:
