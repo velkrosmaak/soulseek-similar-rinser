@@ -16,20 +16,25 @@ import threading
 import sqlite3
 import subprocess
 import signal
-from tqdm import tqdm
+
+from rich.console import Console
+from rich.progress import (
+    Progress,
+    BarColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    DownloadColumn,
+    TransferSpeedColumn,
+    SpinnerColumn,
+    TaskID,
+)
+from rich.panel import Panel
+from rich.table import Table
+from rich import box
 
 from config import PLEX_TOKEN, PLEX_URL
 
-class Color:
-    PURPLE = '\033[95m'
-    CYAN = '\033[96m'
-    DARKCYAN = '\033[36m'
-    BLUE = '\033[94m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BOLD = '\033[1m'
-    END = '\033[0m'
+console = Console()
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "beatport_downloads.db")
 QUEUED_TIMEOUT = 60  # Seconds to wait if remotely queued before giving up
@@ -87,7 +92,10 @@ def get_db_stats() -> str:
     cursor.execute('SELECT COUNT(*) FROM downloads WHERE success = 0')
     f_count = cursor.fetchone()[0]
     conn.close()
-    return f"{s_count} successful, {f_count} failed"
+    return f"[bold green]{s_count}[/] successful, [bold red]{f_count}[/] failed"
+
+# Global list to track downloaded file sizes for stats
+DOWNLOADED_SIZES = []
 
 GENRE_MAP = {
     "dnb": ("drum-bass", 1),
@@ -119,7 +127,7 @@ def get_beatport_top_100(genre_key: str) -> list[dict]:
     """Scrape Beatport Top 100 tracks for a genre."""
     genre_name, genre_id = GENRE_MAP.get(genre_key.lower(), (genre_key, None))
     if not genre_id:
-        print(f"{Color.RED}❌ Unknown genre key.{Color.END}")
+        console.print(f"[bold red]❌ Unknown genre key.[/]")
         return []
 
     url = f"https://www.beatport.com/genre/{genre_name}/{genre_id}/top-100"
@@ -128,8 +136,6 @@ def get_beatport_top_100(genre_key: str) -> list[dict]:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         "Accept-Language": "en-US,en;q=0.9",
     }
-
-    print(f"{Color.DARKCYAN}[⚙️ DEBUG] Fetching Beatport Top 100 for {genre_name.title()}...{Color.END}")
     
     try:
         response = requests.get(url, headers=headers, timeout=15)
@@ -150,7 +156,7 @@ def get_beatport_top_100(genre_key: str) -> list[dict]:
                 break
         return tracks
     except Exception as e:
-        print(f"{Color.RED}❌ Failed to scrape Beatport: {e}{Color.END}")
+        console.print(f"[bold red]❌ Failed to scrape Beatport: {e}[/]")
         return []
 
 def check_plex_for_track(artist: str, track: str) -> bool:
@@ -170,7 +176,7 @@ def check_plex_for_track(artist: str, track: str) -> bool:
         return False
     except: return False
 
-def convert_to_mp3(file_path: str):
+def convert_to_mp3(file_path: str, progress: Progress = None):
     """Convert a file to 320kbps MP3 using ffmpeg if it's not already an MP3."""
     if not file_path or not os.path.exists(file_path):
         return
@@ -180,16 +186,25 @@ def convert_to_mp3(file_path: str):
         return
 
     new_file = base + ".mp3"
-    print(f"\n      {Color.PURPLE}🔄 Converting {ext[1:].upper()} to 320kbps MP3...{Color.END}")
+    
+    task_id = None
+    if progress:
+        task_id = progress.add_task(f"[bold magenta]🔄 Converting {os.path.basename(file_path)}", total=None)
+    else:
+        console.log(f"[bold magenta]🔄 Converting {os.path.basename(file_path)} to 320kbps MP3...[/]")
+
     try:
         cmd = ["ffmpeg", "-y", "-i", file_path, "-codec:a", "libmp3lame", "-b:a", "320k", new_file]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         os.remove(file_path)
-        print(f"      {Color.GREEN}✨ Conversion complete: {os.path.basename(new_file)}{Color.END}")
+        console.log(f"[bold green]✨ Conversion complete: {os.path.basename(new_file)}[/]")
     except Exception as e:
-        print(f"      {Color.RED}❌ Conversion failed: {e}{Color.END}")
+        console.log(f"[bold red]❌ Conversion failed for {os.path.basename(file_path)}: {e}[/]")
+    finally:
+        if progress and task_id:
+            progress.remove_task(task_id)
 
-def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> tuple[bool, str | None, str | None]:
+def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progress: Progress) -> tuple[bool, str | None, str | None]:
     """Run the local sockseek command and monitor for remote queues."""
     query = f"{artist} {title}"
     if remix and "original" not in remix.lower():
@@ -206,7 +221,7 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> tupl
         "--pass", "1Ndustry"
     ]
 
-    print(f"    {Color.CYAN}🚀 Running sockseek: {query}{Color.END}")
+    task_id = progress.add_task(f"[bold cyan]🔍 Searching: {query}", total=100)
     
     try:
         process = subprocess.Popen(
@@ -239,13 +254,16 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> tupl
                 if char in ['\n', '\r']:
                     clean_line = buffer.strip()
                     if clean_line:
-                        # Print the line, clearing trailing characters if it's a \r update
-                        sys.stdout.write(f"\r      {Color.DARKCYAN}» {clean_line}{Color.END}          ")
-                        if char == '\n':
-                            sys.stdout.write('\n')
-                        sys.stdout.flush()
+                        # Log sockseek output to console above progress bars
+                        progress.console.log(f"[dim]» {clean_line}[/]")
 
                         lower_line = clean_line.lower()
+                        
+                        # Parse percentage progress if present: (50.5%)
+                        m_pct = re.search(r"\((\d+(?:\.\d+)?)%\)", clean_line)
+                        if m_pct:
+                            progress.update(task_id, completed=float(m_pct.group(1)), description=f"[bold cyan]🚀 Downloading: {query}")
+
                         if "songjob: succeeded" in lower_line:
                             job_succeeded = True
                             # Extract local path. Format: SongJob: succeeded: Query: User\Path\to\file.ext
@@ -270,8 +288,9 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> tupl
                             if queued_start_time is None:
                                 queued_start_time = time.time()
                             if time.time() - queued_start_time > QUEUED_TIMEOUT:
-                                print(f"\n    {Color.RED}⏱️ Queued for too long ({QUEUED_TIMEOUT}s). Canceling...{Color.END}")
+                                progress.console.log(f"[bold red]⏱️ Queued for too long ({QUEUED_TIMEOUT}s). Canceling...[/]")
                                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                                progress.remove_task(task_id)
                                 return False, remote_user, None
                         elif "downloading" in lower_line:
                             queued_start_time = None
@@ -281,17 +300,19 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> tupl
             else:
                 # No data received in the last second
                 if time.time() - last_activity > STALL_TIMEOUT:
-                    print(f"\n    {Color.RED}❌ Stall detected: No output for {STALL_TIMEOUT}s. Killing...{Color.END}")
+                    progress.console.log(f"[bold red]❌ Stall detected: No output for {STALL_TIMEOUT}s. Killing...[/]")
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    progress.remove_task(task_id)
                     return False, remote_user, None
                 
                 if process.poll() is not None:
                     break
 
+        progress.remove_task(task_id)
         return (job_succeeded or process.returncode == 0), remote_user, downloaded_file_path
 
     except Exception as e:
-        print(f"    {Color.RED}❌ sockseek error: {e}{Color.END}")
+        console.print(f"    [bold red]❌ sockseek error: {e}[/]")
         return False, None, None
 
 def main():
@@ -304,51 +325,95 @@ def main():
     
     genre_key = args.genre.lower()
     if genre_key not in GENRE_MAP:
-        print(f"{Color.RED}Unknown genre. Choose from: {', '.join(GENRE_MAP.keys())}{Color.END}")
+        console.print(f"[bold red]Unknown genre. Choose from: {', '.join(GENRE_MAP.keys())}[/]")
         sys.exit(1)
+
+    genre_display = GENRE_MAP[genre_key][0]
+    
+    console.print(Panel(
+        f"Target Genre: [bold yellow]{genre_display.upper()}[/]\nStats: {get_db_stats()}",
+        title="[bold cyan]Soulseek Local Rinser[/]",
+        border_style="cyan",
+        box=box.DOUBLE
+    ))
 
     tracks = get_beatport_top_100(genre_key)
     if not tracks:
-        print(f"{Color.RED}No tracks found.{Color.END}")
+        console.print(f"[bold red]No tracks found.[/]")
         return
 
-    genre_display = GENRE_MAP[genre_key][0]
-    print(f"\n{Color.BOLD}{Color.CYAN}🚀 Local Rinser: Top 100 {genre_display}...{Color.END}\n")
-    print(f"    {Color.DARKCYAN}📊 Database stats: {get_db_stats()}{Color.END}\n")
-
-    for i, t in enumerate(tracks, 1):
-        artist, title, remix = t['artist'], t['title'], t['remix']
-        track_tag = f"{Color.DARKCYAN}[{i:03d}]{Color.END}"
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=None),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        expand=True
+    ) as progress:
         
-        # 1. Check DB
-        if track_exists(artist, title, remix):
-            print(f"  {track_tag} {Color.BLUE}💾 {artist} - {title} (In Local DB){Color.END}")
-            continue
+        overall_task = progress.add_task(f"[bold yellow]Processing Top 100: {genre_display}", total=len(tracks))
 
-        # 2. Check Plex
-        if check_plex_for_track(artist, title):
-            print(f"  {track_tag} {Color.GREEN}✅ {artist} - {title} (In Plex){Color.END}")
-            continue
+        for i, t in enumerate(tracks, 1):
+            artist, title, remix = t['artist'], t['title'], t['remix']
+            track_tag = f"[{i:03d}]"
+            
+            progress.update(overall_task, description=f"[bold yellow]Processing: {artist} - {title}")
 
-        # 3. Download
-        if args.download:
-            print(f"  {track_tag} {Color.YELLOW}🔍 {artist} - {title}{Color.END}")
-            success, r_user, f_path = run_sockseek(artist, title, remix, genre_display)
-            add_to_db(artist, title, remix, r_user, success)
-            if success:
-                print(f"    {Color.PURPLE}📦 Finished (User: {r_user or 'Unknown'}).{Color.END}")
-                if f_path:
-                    # Start conversion in a separate thread so the next search can begin
-                    threading.Thread(target=convert_to_mp3, args=(f_path,), daemon=True).start()
+            # 1. Check DB
+            if track_exists(artist, title, remix):
+                progress.console.log(f"[blue]{track_tag} 💾 {artist} - {title} (In Local DB)[/]")
+                progress.advance(overall_task)
+                continue
+
+            # 2. Check Plex
+            if check_plex_for_track(artist, title):
+                progress.console.log(f"[green]{track_tag} ✅ {artist} - {title} (In Plex)[/]")
+                progress.advance(overall_task)
+                continue
+
+            # 3. Download
+            if args.download:
+                success, r_user, f_path = run_sockseek(artist, title, remix, genre_display, progress)
+                add_to_db(artist, title, remix, r_user, success)
+                if success:
+                    progress.console.log(f"[bold magenta]{track_tag} 📦 Finished (User: {r_user or 'Unknown'})[/]")
+                    if f_path and os.path.exists(f_path):
+                        DOWNLOADED_SIZES.append(os.path.getsize(f_path))
+                        # Start conversion in a separate thread
+                        threading.Thread(target=convert_to_mp3, args=(f_path, progress), daemon=True).start()
+                else:
+                    progress.console.log(f"[bold red]{track_tag} ❌ Failed or Skipped (User: {r_user or 'Unknown'})[/]")
             else:
-                print(f"    {Color.RED}❌ Failed or Skipped (User: {r_user or 'Unknown'}).{Color.END}")
-        else:
-            print(f"  {track_tag} {Color.YELLOW}❌ {artist} - {title} (Missing){Color.END}")
+                progress.console.log(f"[bold yellow]{track_tag} ❌ {artist} - {title} (Missing)[/]")
 
-        # Brief sleep to let the OS release the listening port (49998)
-        time.sleep(2)
+            progress.advance(overall_task)
+            time.sleep(2) # Port release wait
 
-    print(f"\n{Color.BOLD}{Color.GREEN}✅ Processing complete.{Color.END}")
+    # Final Stats Summary
+    if DOWNLOADED_SIZES:
+        total_bytes = sum(DOWNLOADED_SIZES)
+        avg_bytes = total_bytes / len(DOWNLOADED_SIZES)
+        min_bytes = min(DOWNLOADED_SIZES)
+        max_bytes = max(DOWNLOADED_SIZES)
+
+        table = Table(title="[bold cyan]Download Statistics[/]", box=box.ROUNDED, header_style="bold blue")
+        table.add_column("Metric", style="dim")
+        table.add_column("Value", justify="right")
+        
+        def to_mb(b): return f"{b / 1024 / 1024:.2f} MB"
+
+        table.add_row("Total Files Downloaded", str(len(DOWNLOADED_SIZES)))
+        table.add_row("Total Data Volume", to_mb(total_bytes))
+        table.add_row("Average File Size", to_mb(avg_bytes))
+        table.add_row("Smallest File", to_mb(min_bytes))
+        table.add_row("Largest File", to_mb(max_bytes))
+
+        console.print("\n", table)
+    
+    console.print(f"\n[bold green]✅ All tracks processed.[/]")
 
 if __name__ == "__main__":
     main()
