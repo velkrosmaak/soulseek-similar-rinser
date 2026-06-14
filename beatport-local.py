@@ -9,6 +9,8 @@ import json
 import os
 import re
 import sys
+import tty
+import termios
 import select
 import time
 import requests
@@ -204,6 +206,23 @@ def convert_to_mp3(file_path: str, progress: Progress = None):
         if progress and task_id:
             progress.remove_task(task_id)
 
+def check_skip(timeout: float = 0.0) -> bool:
+    """Check if 's' was pressed. If timeout > 0, waits for input."""
+    if not sys.stdin.isatty():
+        return False
+    old_settings = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setcbreak(sys.stdin.fileno())
+        rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+        if rlist:
+            char = sys.stdin.read(1)
+            if char.lower() == 's':
+                termios.tcflush(sys.stdin, termios.TCIFLUSH)
+                return True
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSANOW, old_settings)
+    return False
+
 def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progress: Progress) -> tuple[bool, str | None, str | None]:
     """Run the local sockseek command and monitor for remote queues."""
     query = f"{artist} {title}"
@@ -223,6 +242,12 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
 
     task_id = progress.add_task(f"[bold cyan]🔍 Searching: {query}", total=100)
     
+    # Set up TTY for skip detection if possible
+    old_settings = None
+    if sys.stdin.isatty():
+        old_settings = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())
+
     try:
         process = subprocess.Popen(
             cmd, 
@@ -240,10 +265,24 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
         buffer = ""
 
         while True:
-            # Use select to check for data with a 1-second timeout
-            rlist, _, _ = select.select([process.stdout], [], [], 1.0)
+            # Use select to check for data from stdout and stdin (for skip)
+            inputs = [process.stdout]
+            if sys.stdin.isatty():
+                inputs.append(sys.stdin)
+            
+            rlist, _, _ = select.select(inputs, [], [], 1.0)
 
-            if rlist:
+            # Check for skip press
+            if sys.stdin.isatty() and sys.stdin in rlist:
+                char = sys.stdin.read(1)
+                if char.lower() == 's':
+                    progress.console.log(f"[bold yellow]⏩ Skip requested. Killing search/download for: {artist} - {title}[/]")
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    termios.tcflush(sys.stdin, termios.TCIFLUSH)
+                    progress.remove_task(task_id)
+                    return False, remote_user, None
+
+            if process.stdout in rlist:
                 # Read character by character to catch \r progress updates
                 char = process.stdout.read(1)
                 if not char:
@@ -312,8 +351,11 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
         return (job_succeeded or process.returncode == 0), remote_user, downloaded_file_path
 
     except Exception as e:
-        console.print(f"    [bold red]❌ sockseek error: {e}[/]")
+        progress.console.log(f"    [bold red]❌ sockseek error: {e}[/]")
         return False, None, None
+    finally:
+        if old_settings:
+            termios.tcsetattr(sys.stdin, termios.TCSANOW, old_settings)
 
 def main():
     parser = argparse.ArgumentParser(description="Download Beatport Top 100 via local sockseek.")
@@ -362,6 +404,12 @@ def main():
             
             progress.update(overall_task, description=f"[bold yellow]Processing: {artist} - {title}")
 
+            # Allow skipping before processing starts
+            if check_skip():
+                progress.console.log(f"[bold yellow]⏩ Skipping track: {artist} - {title}[/]")
+                progress.advance(overall_task)
+                continue
+
             # 1. Check DB
             if track_exists(artist, title, remix):
                 progress.console.log(f"[blue]{track_tag} 💾 {artist} - {title} (In Local DB)[/]")
@@ -390,7 +438,7 @@ def main():
                 progress.console.log(f"[bold yellow]{track_tag} ❌ {artist} - {title} (Missing)[/]")
 
             progress.advance(overall_task)
-            time.sleep(2) # Port release wait
+            check_skip(2.0) # Port release wait + skip check
 
     # Final Stats Summary
     if DOWNLOADED_SIZES:
