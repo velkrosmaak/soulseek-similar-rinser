@@ -44,28 +44,49 @@ def init_db():
             artist TEXT,
             title TEXT,
             remix TEXT,
+            username TEXT,
+            success BOOLEAN,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Migration: Add columns if they don't exist in an older DB
+    cursor.execute("PRAGMA table_info(downloads)")
+    cols = [c[1] for c in cursor.fetchall()]
+    if 'username' not in cols:
+        cursor.execute("ALTER TABLE downloads ADD COLUMN username TEXT")
+    if 'success' not in cols:
+        cursor.execute("ALTER TABLE downloads ADD COLUMN success BOOLEAN DEFAULT 1")
     conn.commit()
     conn.close()
 
 def track_exists(artist: str, title: str, remix: str) -> bool:
-    """Check if a track has already been enqueued."""
+    """Check if a track has already been successfully downloaded."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT 1 FROM downloads WHERE artist = ? AND title = ? AND remix = ?', (artist, title, remix))
+    cursor.execute('SELECT 1 FROM downloads WHERE artist = ? AND title = ? AND remix = ? AND success = 1', (artist, title, remix))
     exists = cursor.fetchone() is not None
     conn.close()
     return exists
 
-def add_to_db(artist: str, title: str, remix: str):
-    """Log an enqueued track to the database."""
+def add_to_db(artist: str, title: str, remix: str, username: str = None, success: bool = True):
+    """Log a download attempt (success or failure) to the database."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('INSERT INTO downloads (artist, title, remix) VALUES (?, ?, ?)', (artist, title, remix))
+    cursor.execute('INSERT INTO downloads (artist, title, remix, username, success) VALUES (?, ?, ?, ?, ?)', 
+                   (artist, title, remix, username, int(success)))
     conn.commit()
     conn.close()
+
+def get_db_stats() -> str:
+    """Get formatted statistics of logged downloads."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM downloads WHERE success = 1')
+    s_count = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM downloads WHERE success = 0')
+    f_count = cursor.fetchone()[0]
+    conn.close()
+    return f"{s_count} successful, {f_count} failed"
 
 GENRE_MAP = {
     "dnb": ("drum-bass", 1),
@@ -148,7 +169,7 @@ def check_plex_for_track(artist: str, track: str) -> bool:
         return False
     except: return False
 
-def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> bool:
+def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> tuple[bool, str | None]:
     """Run the local sockseek command and monitor for remote queues."""
     query = f"{artist} {title}"
     if remix and "original" not in remix.lower():
@@ -177,6 +198,8 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> bool
         )
 
         queued_start_time = None
+        job_succeeded = False
+        remote_user = None
         last_activity = time.time()
         buffer = ""
 
@@ -202,6 +225,16 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> bool
                         sys.stdout.flush()
 
                         lower_line = clean_line.lower()
+                        if "songjob: succeeded" in lower_line:
+                            job_succeeded = True
+
+                        # Try to extract username: [4] SongJob: status: Query: User\Path
+                        if "songjob:" in lower_line:
+                            # User is typically after the third colon and before the first backslash
+                            job_match = re.search(r"SongJob:.*?:.*?: (.*?)[\\/]", clean_line)
+                            if job_match:
+                                remote_user = job_match.group(1).strip()
+
                         # Monitor Queue logic
                         if "queued" in lower_line:
                             if queued_start_time is None:
@@ -209,7 +242,7 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> bool
                             if time.time() - queued_start_time > QUEUED_TIMEOUT:
                                 print(f"\n    {Color.RED}⏱️ Queued for too long ({QUEUED_TIMEOUT}s). Canceling...{Color.END}")
                                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                                return False
+                                return False, remote_user
                         elif "downloading" in lower_line:
                             queued_start_time = None
                     buffer = ""
@@ -220,16 +253,16 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> bool
                 if time.time() - last_activity > STALL_TIMEOUT:
                     print(f"\n    {Color.RED}❌ Stall detected: No output for {STALL_TIMEOUT}s. Killing...{Color.END}")
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    return False
+                    return False, remote_user
                 
                 if process.poll() is not None:
                     break
 
-        return process.returncode == 0
+        return (job_succeeded or process.returncode == 0), remote_user
 
     except Exception as e:
         print(f"    {Color.RED}❌ sockseek error: {e}{Color.END}")
-        return False
+        return False, None
 
 def main():
     parser = argparse.ArgumentParser(description="Download Beatport Top 100 via local sockseek.")
@@ -251,6 +284,7 @@ def main():
 
     genre_display = GENRE_MAP[genre_key][0]
     print(f"\n{Color.BOLD}{Color.CYAN}🚀 Local Rinser: Top 100 {genre_display}...{Color.END}\n")
+    print(f"    {Color.DARKCYAN}📊 Database stats: {get_db_stats()}{Color.END}\n")
 
     for i, t in enumerate(tracks, 1):
         artist, title, remix = t['artist'], t['title'], t['remix']
@@ -269,12 +303,12 @@ def main():
         # 3. Download
         if args.download:
             print(f"  {track_tag} {Color.YELLOW}🔍 {artist} - {title}{Color.END}")
-            success = run_sockseek(artist, title, remix, genre_display)
+            success, r_user = run_sockseek(artist, title, remix, genre_display)
+            add_to_db(artist, title, remix, r_user, success)
             if success:
-                add_to_db(artist, title, remix)
-                print(f"    {Color.PURPLE}📦 Finished.{Color.END}")
+                print(f"    {Color.PURPLE}📦 Finished (User: {r_user or 'Unknown'}).{Color.END}")
             else:
-                print(f"    {Color.RED}❌ Failed or Skipped.{Color.END}")
+                print(f"    {Color.RED}❌ Failed or Skipped (User: {r_user or 'Unknown'}).{Color.END}")
         else:
             print(f"  {track_tag} {Color.YELLOW}❌ {artist} - {title} (Missing){Color.END}")
 

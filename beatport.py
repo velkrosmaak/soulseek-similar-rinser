@@ -45,37 +45,48 @@ def init_db():
             artist TEXT,
             title TEXT,
             remix TEXT,
+            username TEXT,
+            success BOOLEAN,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute("PRAGMA table_info(downloads)")
+    cols = [c[1] for c in cursor.fetchall()]
+    if 'username' not in cols:
+        cursor.execute("ALTER TABLE downloads ADD COLUMN username TEXT")
+    if 'success' not in cols:
+        cursor.execute("ALTER TABLE downloads ADD COLUMN success BOOLEAN DEFAULT 1")
     conn.commit()
     conn.close()
 
 def track_exists(artist: str, title: str, remix: str) -> bool:
-    """Check if a track has already been enqueued."""
+    """Check if a track has already been successfully downloaded."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT 1 FROM downloads WHERE artist = ? AND title = ? AND remix = ?', (artist, title, remix))
+    cursor.execute('SELECT 1 FROM downloads WHERE artist = ? AND title = ? AND remix = ? AND success = 1', (artist, title, remix))
     exists = cursor.fetchone() is not None
     conn.close()
     return exists
 
-def add_to_db(artist: str, title: str, remix: str):
-    """Log an enqueued track to the database."""
+def add_to_db(artist: str, title: str, remix: str, username: str = None, success: bool = True):
+    """Log a download attempt (success or failure) to the database."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('INSERT INTO downloads (artist, title, remix) VALUES (?, ?, ?)', (artist, title, remix))
+    cursor.execute('INSERT INTO downloads (artist, title, remix, username, success) VALUES (?, ?, ?, ?, ?)', 
+                   (artist, title, remix, username, int(success)))
     conn.commit()
     conn.close()
 
-def get_db_stats() -> int:
-    """Get the total number of logged downloads."""
+def get_db_stats() -> str:
+    """Get formatted statistics of logged downloads."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM downloads')
-    count = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM downloads WHERE success = 1')
+    s_count = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM downloads WHERE success = 0')
+    f_count = cursor.fetchone()[0]
     conn.close()
-    return count
+    return f"{s_count} successful, {f_count} failed"
 
 GENRE_MAP = {
     "dnb": ("drum-bass", 1),
@@ -203,7 +214,7 @@ def check_plex_for_track(artist: str, track: str) -> bool:
     except:
         return False
 
-def trigger_slskd_track_search(idx: int, artist: str, track: str, remix: str, used_users: set, destination: str, require_free_slots: bool = False) -> bool:
+def trigger_slskd_track_search(idx: int, artist: str, track: str, remix: str, used_users: set, destination: str, require_free_slots: bool = False) -> tuple[bool, str | None]:
     """Search and download the best quality track, spreading load across users."""
     track_tag = f"{Color.DARKCYAN}[{idx:03d}]{Color.END}"
     query = f"{artist} {track}"
@@ -316,12 +327,12 @@ def trigger_slskd_track_search(idx: int, artist: str, track: str, remix: str, us
                 used_users.add(user)
             else:
                 print(f"    {track_tag} {Color.YELLOW}⚠️ No suitable results found.{Color.END}")
-            return enqueued
+            return enqueued, target_user
         finally:
             slskd_client.searches.delete(id=search_id)
     except Exception as e:
         print(f"    {track_tag} {Color.RED}❌ Search failed: {e}{Color.END}")
-        return False
+        return False, None
 
 def optimize_queued_downloads(destination: str, used_users: set, enqueued_metadata: list):
     """
@@ -424,9 +435,10 @@ def main():
             print(f"  {track_tag} {Color.GREEN}✅ {artist} - {title}{Color.END}")
         else:
             if args.download:
-                if trigger_slskd_track_search(i, artist, title, remix, used_users, destination):
+                success, user = trigger_slskd_track_search(i, artist, title, remix, used_users, destination)
+                add_to_db(artist, title, remix, username=user, success=success)
+                if success:
                     enqueued_metadata.append({'idx': i, 'artist': artist, 'title': title, 'remix': remix})
-                    add_to_db(artist, title, remix)
             else:
                 print(f"  {track_tag} {Color.YELLOW}❌ {artist} - {title} (Missing){Color.END}")
 
