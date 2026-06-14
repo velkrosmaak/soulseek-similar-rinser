@@ -155,7 +155,7 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str) -> bool
         query += f" {remix}"
     query = re.sub(r'[\W_]+', ' ', query).strip()
 
-    dest_path = f"/media/dj/beatport top 100/{genre_folder}"
+    dest_path = f"/media/quark/dj/beatport top 100/{genre_folder}"
     
     cmd = [
         "./sockseek",
