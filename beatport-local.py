@@ -34,6 +34,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich import box
 
+try:
+    import pushover_config
+except ImportError:
+    pushover_config = None
+
 from config import PLEX_TOKEN, PLEX_URL
 
 console = Console()
@@ -98,6 +103,7 @@ def get_db_stats() -> str:
 
 # Global list to track downloaded file sizes for stats
 DOWNLOADED_SIZES = []
+DOWNLOADED_ARTISTS = []
 
 GENRE_MAP = {
     "dnb": ("drum-bass", 1),
@@ -222,6 +228,24 @@ def check_skip(timeout: float = 0.0) -> bool:
     finally:
         termios.tcsetattr(sys.stdin, termios.TCSANOW, old_settings)
     return False
+
+def send_pushover_notification(title, message):
+    """Send a notification via Pushover."""
+    if not pushover_config or not pushover_config.PUSHOVER_API_TOKEN or not pushover_config.PUSHOVER_USER_KEY:
+        console.log("[bold yellow]⚠️ Pushover notification skipped: Credentials not found in pushover_config.py[/]")
+        return
+
+    url = "https://api.pushover.net/1/messages.json"
+    data = {
+        "token": pushover_config.PUSHOVER_API_TOKEN,
+        "user": pushover_config.PUSHOVER_USER_KEY,
+        "title": title,
+        "message": message
+    }
+    try:
+        requests.post(url, data=data, timeout=10)
+    except Exception as e:
+        console.log(f"[bold red]❌ Failed to send Pushover notification: {e}[/]")
 
 def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progress: Progress) -> tuple[bool, str | None, str | None]:
     """Run the local sockseek command and monitor for remote queues."""
@@ -430,6 +454,7 @@ def main():
                     progress.console.log(f"[bold magenta]{track_tag} 📦 Finished (User: {r_user or 'Unknown'})[/]")
                     if f_path and os.path.exists(f_path):
                         DOWNLOADED_SIZES.append(os.path.getsize(f_path))
+                        DOWNLOADED_ARTISTS.append(artist)
                         # Start conversion in a separate thread
                         threading.Thread(target=convert_to_mp3, args=(f_path, progress), daemon=True).start()
                 else:
@@ -460,6 +485,15 @@ def main():
         table.add_row("Largest File", to_mb(max_bytes))
 
         console.print("\n", table)
+
+        # Send Pushover Notification
+        unique_artists = sorted(list(set(DOWNLOADED_ARTISTS)))
+        msg = (
+            f"Tracks: {len(DOWNLOADED_SIZES)}\n"
+            f"Total Size: {to_mb(total_bytes)}\n"
+            f"Artists: {', '.join(unique_artists)}"
+        )
+        send_pushover_notification(args.genre, msg)
     
     console.print(f"\n[bold green]✅ All tracks processed.[/]")
 
