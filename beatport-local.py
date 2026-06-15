@@ -329,22 +329,19 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
 
                         if "songjob: succeeded" in lower_line:
                             job_succeeded = True
-                            # Extract local path. Format: SongJob: succeeded: Query: User\Path\to\file.ext
-                            path_match = re.search(r"SongJob: succeeded:.*?: (.*)", clean_line)
-                            if path_match:
-                                rel_path = path_match.group(1).replace('\\', os.sep).replace('/', os.sep)
-                                downloaded_file_path = os.path.join(dest_path, rel_path)
-                                
-                                # Also update remote_user from this line if not already caught
-                                if not remote_user:
-                                    remote_user = rel_path.split(os.sep)[0]
 
-                        # Try to extract username: [4] SongJob: status: Query: User\Path
+                        # Track username and file path from any SongJob output for cleanup/status tracking
                         if "songjob:" in lower_line:
-                            # User is typically after the third colon and before the first backslash
-                            job_match = re.search(r"SongJob:.*?:.*?: (.*?)[\\/]", clean_line)
-                            if job_match:
-                                remote_user = job_match.group(1).strip()
+                            # Format: SongJob: status/succeeded: Query: User\Path\to\file.ext (Progress%)
+                            path_info_match = re.search(r"SongJob:.*?:.*?: (.*?)(?:\s+\(|$)", clean_line)
+                            if path_info_match:
+                                rel_path = path_info_match.group(1).strip().replace('\\', os.sep).replace('/', os.sep)
+                                # Capture path if it contains at least one separator (indicating User\File or User\Dir\File)
+                                if os.sep in rel_path:
+                                    downloaded_file_path = os.path.join(dest_path, rel_path)
+                                    if not remote_user:
+                                        # Remote user is the first part of the relative path
+                                        remote_user = rel_path.split(os.sep)[0]
 
                         # Monitor Queue logic
                         if "queued" in lower_line:
@@ -380,6 +377,18 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
     finally:
         if old_settings:
             termios.tcsetattr(sys.stdin, termios.TCSANOW, old_settings)
+
+        # Cleanup partial files if the job didn't finish successfully
+        if not job_succeeded and downloaded_file_path:
+            # Brief sleep to ensure file handles are released after process termination
+            time.sleep(0.5)
+            incomplete_path = f"{downloaded_file_path}.incomplete"
+            if os.path.exists(incomplete_path):
+                try:
+                    os.remove(incomplete_path)
+                    progress.console.log(f"[bold yellow]🧹 Removed partial file: {os.path.basename(incomplete_path)}[/]")
+                except Exception as cleanup_err:
+                    progress.console.log(f"[bold red]⚠️ Cleanup failed for {os.path.basename(incomplete_path)}: {cleanup_err}[/]")
 
 def main():
     parser = argparse.ArgumentParser(description="Download Beatport Top 100 via local sockseek.")
