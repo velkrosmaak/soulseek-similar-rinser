@@ -464,8 +464,12 @@ def main():
                     if f_path and os.path.exists(f_path):
                         DOWNLOADED_SIZES.append(os.path.getsize(f_path))
                         DOWNLOADED_ARTISTS.append(artist)
-                        # Start conversion in a separate thread
-                        threading.Thread(target=convert_to_mp3, args=(f_path, progress), daemon=True).start()
+                        # Run conversion synchronously to ensure it completes before the script exits
+                        convert_to_mp3(f_path, progress)
+                    elif f_path:
+                        progress.console.log(f"[bold yellow]⚠️ Downloaded file missing at: {f_path}[/]")
+                    else:
+                        progress.console.log(f"[bold red]⚠️ Could not determine file path for conversion.[/]")
                 else:
                     progress.console.log(f"[bold red]{track_tag} ❌ Failed or Skipped (User: {r_user or 'Unknown'})[/]")
             else:
