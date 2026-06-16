@@ -329,14 +329,8 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
                 if char in ['\n', '\r']:
                     clean_line = buffer.strip()
                     if clean_line:
-                        # Filter out common CLI noise (separators like ________ or ---------)
-                        if re.match(r'^[_\-=\s*]+$', clean_line):
-                            buffer = ""
-                            continue
-                            
-                        # Log sockseek output to console above progress bars
-                        progress.console.log(f"[dim]  ↳ {clean_line}[/]")
-
+                        # RAW DEBUG: Print the line exactly as it comes from the process
+                        progress.console.log(f"[grey37]RAW: {clean_line}[/]")
                         lower_line = clean_line.lower()
                         
                         # Try to parse byte sizes for meaningful progress (e.g., "5.1 MB / 10.2 MB")
