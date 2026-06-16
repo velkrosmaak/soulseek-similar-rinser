@@ -253,6 +253,11 @@ def send_pushover_notification(title, message):
     except Exception as e:
         console.log(f"[bold red]❌ Failed to connect to Pushover: {e}[/]")
 
+def parse_size_to_bytes(value: str, unit: str) -> int:
+    """Convert size strings like '10.5' and 'MB' to bytes."""
+    units = {"kb": 1024, "mb": 1024**2, "gb": 1024**3, "b": 1}
+    return int(float(value) * units.get(unit.lower(), 1))
+
 def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progress: Progress) -> tuple[bool, str | None, str | None]:
     """Run the local sockseek command and monitor for remote queues."""
     query = f"{artist} {title}"
@@ -270,7 +275,8 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
         "--pass", "1Ndustry"
     ]
 
-    task_id = progress.add_task(f"[bold cyan]🔍 Searching: {query}", total=100)
+    # Start with total=None to show a pulsing "searching" bar until download starts
+    task_id = progress.add_task(f"[bold cyan]🔍 Searching: {query}", total=None)
     
     # Set up TTY for skip detection if possible
     old_settings = None
@@ -333,10 +339,19 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
 
                         lower_line = clean_line.lower()
                         
-                        # Parse percentage progress if present: (50.5%)
-                        m_pct = re.search(r"\((\d+(?:\.\d+)?)%\)", clean_line)
-                        if m_pct:
-                            progress.update(task_id, completed=float(m_pct.group(1)), description=f"[bold cyan]🚀 Downloading: {query}")
+                        # Try to parse byte sizes for meaningful progress (e.g., "5.1 MB / 10.2 MB")
+                        # This makes DownloadColumn and TransferSpeedColumn work correctly
+                        size_match = re.search(r"(\d+(?:\.\d+)?)\s*([KMG]?B)\s*/\s*(\d+(?:\.\d+)?)\s*([KMG]?B)", clean_line, re.IGNORECASE)
+                        if size_match:
+                            cur_val, cur_unit, tot_val, tot_unit = size_match.groups()
+                            cur_bytes = parse_size_to_bytes(cur_val, cur_unit)
+                            tot_bytes = parse_size_to_bytes(tot_val, tot_unit)
+                            progress.update(task_id, completed=cur_bytes, total=tot_bytes, description=f"[bold cyan]🚀 Downloading: {query}")
+                        else:
+                            # Fallback: Parse percentage progress if present: (50.5%)
+                            m_pct = re.search(r"(\d+(?:\.\d+)?)\s*%", clean_line)
+                            if m_pct:
+                                progress.update(task_id, completed=float(m_pct.group(1)), total=100, description=f"[bold cyan]🚀 Downloading: {query}")
 
                         if "songjob: succeeded" in lower_line:
                             job_succeeded = True
