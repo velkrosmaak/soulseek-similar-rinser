@@ -356,18 +356,24 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
                         if "songjob: succeeded" in lower_line:
                             job_succeeded = True
 
-                        # Track username and file path from any SongJob output for cleanup/status tracking
+                        # Track username and file path from SongJob output
+                        # sockseek often prints the path on the line following 'succeeded'
+                        possible_path = None
                         if "songjob:" in lower_line:
-                            # Format: SongJob: status/succeeded: Query: User\Path\to\file.ext (Progress%)
-                            path_info_match = re.search(r"SongJob:.*?:.*?: (.*?)(?:\s+\(|$)", clean_line)
-                            if path_info_match:
-                                rel_path = path_info_match.group(1).strip().replace('\\', os.sep).replace('/', os.sep)
-                                # Capture path if it contains at least one separator (indicating User\File or User\Dir\File)
-                                if os.sep in rel_path:
-                                    downloaded_file_path = os.path.join(dest_path, rel_path)
-                                    if not remote_user:
-                                        # Remote user is the first part of the relative path
-                                        remote_user = rel_path.split(os.sep)[0]
+                            m = re.search(r"SongJob:.*?:.*?: (.*?)(?:\s+\(|$)", clean_line)
+                            if m and m.group(1).strip():
+                                potential = m.group(1).strip()
+                                if "\\" in potential or "/" in potential:
+                                    possible_path = potential
+                        elif re.search(r"^[a-zA-Z0-9].*[\\/].*\.[a-zA-Z0-9]+$", clean_line):
+                            # Standalone line looking like a relative path: User\Path\File.ext
+                            possible_path = clean_line
+
+                        if possible_path:
+                            rel_path = possible_path.replace('\\', os.sep).replace('/', os.sep)
+                            downloaded_file_path = os.path.join(dest_path, rel_path)
+                            if not remote_user and os.sep in rel_path:
+                                remote_user = rel_path.split(os.sep)[0]
 
                         # Monitor Queue logic
                         if "queued" in lower_line:
@@ -502,12 +508,30 @@ def main():
                 if success:
                     progress.console.log(f"[bold magenta]{track_tag} 📦 Finished (User: {r_user or 'Unknown'})[/]")
                     processed_stats["downloaded"] += 1
-                    if f_path and os.path.exists(f_path):
-                        DOWNLOADED_SIZES.append(os.path.getsize(f_path))
+
+                    # Filesystem settle/location check
+                    final_path = f_path
+                    if final_path and not os.path.exists(final_path):
+                        # 1. Wait briefly for move/sync
+                        for _ in range(6):
+                            time.sleep(0.5)
+                            if os.path.exists(final_path): break
+                        
+                        # 2. If still missing, check if it's nested under a query folder or similar
+                        if not os.path.exists(final_path):
+                            filename = os.path.basename(final_path)
+                            genre_dir = f"/media/quark/dj/beatport top 100/{genre_display}"
+                            for root, dirs, files in os.walk(genre_dir):
+                                if filename in files:
+                                    final_path = os.path.join(root, filename)
+                                    break
+
+                    if final_path and os.path.exists(final_path):
+                        DOWNLOADED_SIZES.append(os.path.getsize(final_path))
                         DOWNLOADED_ARTISTS.append(artist)
                         newly_downloaded_artists.append(artist)
                         # Run conversion synchronously to ensure it completes before the script exits
-                        convert_to_mp3(f_path, progress)
+                        convert_to_mp3(final_path, progress)
                     elif f_path:
                         progress.console.log(f"[bold yellow]⚠️ Downloaded file missing at: {f_path}[/]")
                     else:
