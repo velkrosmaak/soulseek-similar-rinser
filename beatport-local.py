@@ -242,10 +242,16 @@ def send_pushover_notification(title, message):
         "title": title,
         "message": message
     }
+
+    console.log(f"[bold cyan]📲 Attempting to send Pushover notification: {title}...[/]")
     try:
-        requests.post(url, data=data, timeout=10)
+        response = requests.post(url, data=data, timeout=10)
+        if response.status_code == 200:
+            console.log("[bold green]✅ Pushover notification sent successfully![/]")
+        else:
+            console.log(f"[bold red]❌ Pushover API error ({response.status_code}): {response.text}[/]")
     except Exception as e:
-        console.log(f"[bold red]❌ Failed to send Pushover notification: {e}[/]")
+        console.log(f"[bold red]❌ Failed to connect to Pushover: {e}[/]")
 
 def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progress: Progress) -> tuple[bool, str | None, str | None]:
     """Run the local sockseek command and monitor for remote queues."""
@@ -317,8 +323,13 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
                 if char in ['\n', '\r']:
                     clean_line = buffer.strip()
                     if clean_line:
+                        # Filter out common CLI noise (separators like ________ or ---------)
+                        if re.match(r'^[_\-=\s*]+$', clean_line):
+                            buffer = ""
+                            continue
+                            
                         # Log sockseek output to console above progress bars
-                        progress.console.log(f"[dim]» {clean_line}[/]")
+                        progress.console.log(f"[dim]  ↳ {clean_line}[/]")
 
                         lower_line = clean_line.lower()
                         
@@ -394,21 +405,27 @@ def main():
     parser = argparse.ArgumentParser(description="Download Beatport Top 100 via local sockseek.")
     parser.add_argument("genre", help=f"Genre key ({', '.join(GENRE_MAP.keys())})")
     parser.add_argument("--download", action="store_true", help="Trigger downloads")
+    parser.add_argument("--dev", action="store_true", help="Dev mode: only process top 5 tracks")
     args = parser.parse_args()
 
     init_db()
     
     genre_key = args.genre.lower()
     if genre_key not in GENRE_MAP:
-        console.print(f"[bold red]Unknown genre. Choose from: {', '.join(GENRE_MAP.keys())}[/]")
+        console.print(f"[bold red]❌ Unknown genre.[/] Choose from: [cyan]{', '.join(GENRE_MAP.keys())}[/]")
         sys.exit(1)
 
-    genre_display = GENRE_MAP[genre_key][0]
+    # Prettify the genre name (e.g., tech-house -> Tech House)
+    genre_display = GENRE_MAP[genre_key][0].replace('-', ' ').title()
+    
+    status_msg = f"Genre: [bold yellow]{genre_display}[/]\nStats: {get_db_stats()}"
+    if args.dev:
+        status_msg += "\nMode: [bold red]DEVELOPMENT (Top 5 Only)[/]"
     
     console.print(Panel(
-        f"Target Genre: [bold yellow]{genre_display.upper()}[/]\nStats: {get_db_stats()}",
-        title="[bold cyan]Soulseek Local Rinser[/]",
-        border_style="cyan",
+        status_msg,
+        title="[bold magenta]Soulseek Similar Rinser[/]",
+        border_style="magenta",
         box=box.DOUBLE
     ))
 
@@ -416,6 +433,9 @@ def main():
     if not tracks:
         console.print(f"[bold red]No tracks found.[/]")
         return
+
+    if args.dev:
+        tracks = tracks[:5]
 
     with Progress(
         SpinnerColumn(),
