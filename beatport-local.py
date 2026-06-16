@@ -437,6 +437,9 @@ def main():
     if args.dev:
         tracks = tracks[:5]
 
+    processed_stats = {"total": len(tracks), "missing": 0, "downloaded": 0, "already_owned": 0}
+    newly_downloaded_artists = []
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -466,12 +469,14 @@ def main():
             # 1. Check DB
             if track_exists(artist, title, remix):
                 progress.console.log(f"[blue]{track_tag} 💾 {artist} - {title} (In Local DB)[/]")
+                processed_stats["already_owned"] += 1
                 progress.advance(overall_task)
                 continue
 
             # 2. Check Plex
             if check_plex_for_track(artist, title):
                 progress.console.log(f"[green]{track_tag} ✅ {artist} - {title} (In Plex)[/]")
+                processed_stats["already_owned"] += 1
                 progress.advance(overall_task)
                 continue
 
@@ -481,9 +486,11 @@ def main():
                 add_to_db(artist, title, remix, r_user, success)
                 if success:
                     progress.console.log(f"[bold magenta]{track_tag} 📦 Finished (User: {r_user or 'Unknown'})[/]")
+                    processed_stats["downloaded"] += 1
                     if f_path and os.path.exists(f_path):
                         DOWNLOADED_SIZES.append(os.path.getsize(f_path))
                         DOWNLOADED_ARTISTS.append(artist)
+                        newly_downloaded_artists.append(artist)
                         # Run conversion synchronously to ensure it completes before the script exits
                         convert_to_mp3(f_path, progress)
                     elif f_path:
@@ -492,8 +499,10 @@ def main():
                         progress.console.log(f"[bold red]⚠️ Could not determine file path for conversion.[/]")
                 else:
                     progress.console.log(f"[bold red]{track_tag} ❌ Failed or Skipped (User: {r_user or 'Unknown'})[/]")
+                    processed_stats["missing"] += 1
             else:
                 progress.console.log(f"[bold yellow]{track_tag} ❌ {artist} - {title} (Missing)[/]")
+                processed_stats["missing"] += 1
 
             progress.advance(overall_task)
             check_skip(2.0) # Port release wait + skip check
@@ -519,16 +528,19 @@ def main():
 
         console.print("\n", table)
 
-        # Send Pushover Notification
-        unique_artists = sorted(list(set(DOWNLOADED_ARTISTS)))
-        msg = (
-            f"Tracks: {len(DOWNLOADED_SIZES)}\n"
-            f"Total Size: {to_mb(total_bytes)}\n"
-            f"Artists: {', '.join(unique_artists)}"
-        )
-        send_pushover_notification(args.genre, msg)
+    # Send Pushover Notification (Always triggered at the end of the run)
+    unique_new_artists = sorted(list(set(newly_downloaded_artists)))
+    msg = (
+        f"Run complete for {genre_display}.\n"
+        f"• Total: {processed_stats['total']} | Downloaded: {processed_stats['downloaded']}\n"
+        f"• Missing: {processed_stats['missing']} | Owned: {processed_stats['already_owned']}"
+    )
+    if unique_new_artists:
+        msg += f"\n\nNew Artists: {', '.join(unique_new_artists[:12])}{'...' if len(unique_new_artists) > 12 else ''}"
     
-    console.print(f"\n[bold green]✅ All tracks processed.[/]")
+    send_pushover_notification(f"Soulseek Rinser: {genre_display}", msg)
+    
+    console.print(f"\n[bold green]✅ All tracks processed for {genre_display}.[/]")
 
 if __name__ == "__main__":
     main()
