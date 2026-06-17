@@ -270,6 +270,7 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
             cmd, 
             stdout=subprocess.PIPE, 
             stderr=subprocess.STDOUT, 
+            stdin=subprocess.DEVNULL,
             text=True,
             preexec_fn=os.setsid
         )
@@ -282,15 +283,15 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
         buffer = ""
 
         while True:
-            # Use select to check for data from stdout and stdin (for skip)
-            inputs = [process.stdout]
+            # Use file descriptors for select to bypass TextIOWrapper buffering issues
+            inputs = [process.stdout.fileno()]
             if sys.stdin.isatty():
-                inputs.append(sys.stdin)
+                inputs.append(sys.stdin.fileno())
             
-            rlist, _, _ = select.select(inputs, [], [], 1.0)
+            rlist, _, _ = select.select(inputs, [], [], 0.05)
 
             # Check for skip press
-            if sys.stdin.isatty() and sys.stdin in rlist:
+            if sys.stdin.isatty() and sys.stdin.fileno() in rlist:
                 char = sys.stdin.read(1)
                 if char.lower() == 's':
                     progress.console.log(f"[bold yellow]⏩ Skip requested. Killing search/download for: {artist} - {title}[/]")
@@ -299,7 +300,7 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
                     progress.remove_task(task_id)
                     return False, remote_user, None
 
-            if process.stdout in rlist:
+            if process.stdout.fileno() in rlist:
                 # Read character by character to catch \r progress updates
                 char = process.stdout.read(1)
                 if not char:
@@ -517,7 +518,8 @@ def main():
                 processed_stats["missing"] += 1
 
             progress.advance(overall_task)
-            check_skip(2.0) # Port release wait + skip check
+            if check_skip(2.0): # Port release wait + skip check
+                progress.console.log(f"[bold yellow]⏩ Skipping to next track...[/]")
 
     # Final Stats Summary
     if DOWNLOADED_SIZES:
