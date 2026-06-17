@@ -39,8 +39,6 @@ try:
 except ImportError:
     pushover_config = None
 
-from config import PLEX_TOKEN, PLEX_URL
-
 console = Console()
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "beatport_downloads.db")
@@ -166,23 +164,6 @@ def get_beatport_top_100(genre_key: str) -> list[dict]:
     except Exception as e:
         console.print(f"[bold red]❌ Failed to scrape Beatport: {e}[/]")
         return []
-
-def check_plex_for_track(artist: str, track: str) -> bool:
-    """Check if the track exists on Plex."""
-    if not PLEX_TOKEN or not PLEX_URL: return False
-    url = f"{PLEX_URL.rstrip('/')}/search"
-    params = {"type": 10, "query": track, "X-Plex-Token": PLEX_TOKEN}
-    try:
-        response = requests.get(url, params=params, headers={"Accept": "application/json"}, timeout=5)
-        items = response.json().get("MediaContainer", {}).get("Metadata", [])
-        n_artist, n_track = artist.lower().replace(" ", ""), track.lower().replace(" ", "")
-        for item in items:
-            p_artist = item.get("grandparentTitle", "").lower().replace(" ", "")
-            p_track = item.get("title", "").lower().replace(" ", "")
-            if n_track in p_track and (n_artist in p_artist or "various" in p_artist):
-                return True
-        return False
-    except: return False
 
 def convert_to_mp3(file_path: str, progress: Progress = None):
     """Convert a file to 320kbps MP3 using ffmpeg if it's not already an MP3."""
@@ -350,6 +331,11 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
                         if "songjob: succeeded" in lower_line:
                             job_succeeded = True
 
+                        if "songjob: download error:" in lower_line:
+                            progress.console.log(f"[bold red]❌ Sockseek reported failure: {clean_line}[/]")
+                            # Kill the process group to abort immediately; this ensures returncode != 0
+                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+
                         # Track username and file path from SongJob output
                         # sockseek often prints the path on the line following 'succeeded'
                         possible_path = None
@@ -365,7 +351,7 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
 
                         if possible_path:
                             rel_path = possible_path.replace('\\', os.sep).replace('/', os.sep)
-                            downloaded_file_path = os.path.join(dest_path, rel_path)
+                            downloaded_file_path = os.path.normpath(os.path.join(dest_path, rel_path))
                             if not remote_user and os.sep in rel_path:
                                 remote_user = rel_path.split(os.sep)[0]
 
@@ -488,14 +474,7 @@ def main():
                 progress.advance(overall_task)
                 continue
 
-            # 2. Check Plex
-            if check_plex_for_track(artist, title):
-                progress.console.log(f"[green]{track_tag} ✅ {artist} - {title} (In Plex)[/]")
-                processed_stats["already_owned"] += 1
-                progress.advance(overall_task)
-                continue
-
-            # 3. Download
+            # 2. Download
             if args.download:
                 success, r_user, f_path = run_sockseek(artist, title, remix, genre_display, progress)
                 add_to_db(artist, title, remix, r_user, success)
