@@ -18,6 +18,11 @@ import threading
 import sqlite3
 import subprocess
 import signal
+try:
+    import mutagen
+    HAS_MUTAGEN = True
+except ImportError:
+    HAS_MUTAGEN = False
 
 from rich.console import Console
 from rich.progress import (
@@ -165,14 +170,14 @@ def get_beatport_top_100(genre_key: str) -> list[dict]:
         console.print(f"[bold red]❌ Failed to scrape Beatport: {e}[/]")
         return []
 
-def convert_to_mp3(file_path: str, progress: Progress = None):
+def convert_to_mp3(file_path: str, progress: Progress = None) -> str:
     """Convert a file to 320kbps MP3 using ffmpeg if it's not already an MP3."""
     if not file_path or not os.path.exists(file_path):
-        return
+        return file_path
     
     base, ext = os.path.splitext(file_path)
     if ext.lower() == '.mp3':
-        return
+        return file_path
 
     new_file = base + ".mp3"
     
@@ -187,11 +192,48 @@ def convert_to_mp3(file_path: str, progress: Progress = None):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         os.remove(file_path)
         console.log(f"[bold green]✨ Conversion complete: {os.path.basename(new_file)}[/]")
+        return new_file
     except Exception as e:
         console.log(f"[bold red]❌ Conversion failed for {os.path.basename(file_path)}: {e}[/]")
+        return file_path
     finally:
         if progress and task_id:
             progress.remove_task(task_id)
+
+def update_album_tag(file_path: str, album_name: str, progress: Progress = None):
+    """Update the album tag of the file to the genre name."""
+    if not HAS_MUTAGEN or not os.path.exists(file_path):
+        return
+    try:
+        from mutagen import File as MutagenFile
+        audio = MutagenFile(file_path)
+        if audio is None:
+            return
+
+        # Handle MP3 (ID3)
+        if file_path.lower().endswith(".mp3"):
+            from mutagen.easyid3 import EasyID3
+            try:
+                # EasyID3 provides a dictionary-like interface for common tags
+                audio = EasyID3(file_path)
+                audio['album'] = album_name
+                audio.save()
+            except:
+                # Fallback to standard ID3 if EasyID3 fails
+                from mutagen.id3 import ID3, TALB
+                tags = ID3(file_path)
+                tags.add(TALB(encoding=3, text=album_name))
+                tags.save()
+        else:
+            # Handle FLAC and others (Vorbis comments)
+            audio['album'] = album_name
+            audio.save()
+
+        if progress:
+            progress.console.log(f"[dim]  🏷️  Tagged album as '{album_name}'[/]")
+    except Exception as e:
+        if progress:
+            progress.console.log(f"[bold red]⚠️  Tagging failed for {os.path.basename(file_path)}: {e}[/]")
 
 def check_skip(timeout: float = 0.0) -> bool:
     """Check if 's' was pressed. If timeout > 0, waits for input."""
@@ -505,7 +547,8 @@ def main():
                         DOWNLOADED_ARTISTS.append(artist)
                         newly_downloaded_artists.append(artist)
                         # Run conversion synchronously to ensure it completes before the script exits
-                        convert_to_mp3(final_path, progress)
+                        final_mp3_path = convert_to_mp3(final_path, progress)
+                        update_album_tag(final_mp3_path, genre_display, progress)
                     elif f_path:
                         progress.console.log(f"[bold yellow]⚠️ Downloaded file missing at: {f_path}[/]")
                     else:
