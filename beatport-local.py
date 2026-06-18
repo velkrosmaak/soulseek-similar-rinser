@@ -25,19 +25,58 @@ except ImportError:
     HAS_MUTAGEN = False
 
 from rich.console import Console
+from rich.text import Text
 from rich.progress import (
     Progress,
     BarColumn,
     TextColumn,
-    TimeRemainingColumn,
-    DownloadColumn,
-    TransferSpeedColumn,
     SpinnerColumn,
     TaskID,
+    ProgressColumn,
+    TimeElapsedColumn,
 )
 from rich.panel import Panel
 from rich.table import Table
 from rich import box
+
+def format_size(bytes_qty: float) -> str:
+    if bytes_qty <= 0:
+        return "0 B"
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    i = 0
+    while bytes_qty >= 1000.0 and i < len(units) - 1:
+        bytes_qty /= 1000.0
+        i += 1
+    if i == 0:
+        return f"{int(bytes_qty)} B"
+    return f"{bytes_qty:.1f} {units[i]}"
+
+class FileCountColumn(ProgressColumn):
+    def render(self, task):
+        if "processing" in str(task.description).lower():
+            completed = int(task.completed)
+            total = int(task.total) if task.total is not None else 0
+            return Text(f"[{completed}/{total}]", style="green")
+        return Text("")
+
+class TimePerSongColumn(ProgressColumn):
+    def render(self, task):
+        if "processing" in str(task.description).lower():
+            elapsed = task.elapsed
+            completed = int(task.completed)
+            if elapsed is not None and completed > 0:
+                time_per_song = elapsed / completed
+                return Text(f"({time_per_song:.1f}s/song)", style="yellow")
+        return Text("")
+
+class FileSizeColumn(ProgressColumn):
+    def render(self, task):
+        if "downloading" in str(task.description).lower():
+            completed = task.completed
+            total = task.total
+            if total is not None:
+                return Text(f"{format_size(completed)}/{format_size(total)}", style="cyan")
+        return Text("")
 
 try:
     import pushover_config
@@ -577,10 +616,10 @@ def main():
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(bar_width=None),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        DownloadColumn(),
-        TransferSpeedColumn(),
-        TimeRemainingColumn(),
+        FileCountColumn(),
+        TimeElapsedColumn(),
+        TimePerSongColumn(),
+        FileSizeColumn(),
         console=console,
         expand=True
     ) as progress:
