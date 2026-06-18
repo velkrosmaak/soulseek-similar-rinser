@@ -48,7 +48,7 @@ console = Console()
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "beatport_downloads.db")
 QUEUED_TIMEOUT = 60  # Seconds to wait if remotely queued before giving up
-STALL_TIMEOUT = 120  # Seconds of "dead air" (no output/progress) before assuming stuck
+STALL_TIMEOUT = 60  # Seconds of "dead air" (no output/progress) before assuming stuck
 
 def init_db():
     """Initialize the SQLite database for tracking downloads."""
@@ -281,6 +281,39 @@ def parse_size_to_bytes(value: str, unit: str) -> int:
     units = {"kb": 1024, "mb": 1024**2, "gb": 1024**3, "b": 1}
     return int(float(value) * units.get(unit.lower(), 1))
 
+def get_active_download_file_info(dest_path: str, downloaded_file_path: str | None) -> dict[str, int]:
+    """Find active files (.incomplete or audio) in dest_path and get their sizes."""
+    files_to_check = []
+    if downloaded_file_path:
+        files_to_check.append(downloaded_file_path)
+        files_to_check.append(f"{downloaded_file_path}.incomplete")
+        
+    if os.path.isdir(dest_path):
+        try:
+            for root, _, files in os.walk(dest_path):
+                for f in files:
+                    if f.endswith('.incomplete') or os.path.splitext(f)[1].lower() in {'.mp3', '.flac', '.m4a', '.mp4', '.ogg', '.opus', '.wav'}:
+                        files_to_check.append(os.path.join(root, f))
+        except Exception:
+            pass
+            
+    seen = set()
+    unique_files = []
+    for f in files_to_check:
+        abs_p = os.path.abspath(f)
+        if abs_p not in seen:
+            seen.add(abs_p)
+            unique_files.append(abs_p)
+            
+    active_files = {}
+    for f in unique_files:
+        if os.path.exists(f):
+            try:
+                active_files[f] = os.path.getsize(f)
+            except Exception:
+                pass
+    return active_files
+
 def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progress: Progress) -> tuple[bool, str | None, str | None]:
     """Run the local sockseek command and monitor for remote queues."""
     query = f"{artist} {title}"
@@ -324,7 +357,41 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
         last_activity = time.time()
         buffer = ""
 
+        # Pre-populate initial file sizes to prevent false activity detection of existing files
+        last_file_sizes = {}
+        if os.path.isdir(dest_path):
+            try:
+                for root, _, files in os.walk(dest_path):
+                    for f in files:
+                        if f.endswith('.incomplete') or os.path.splitext(f)[1].lower() in {'.mp3', '.flac', '.m4a', '.mp4', '.ogg', '.opus', '.wav'}:
+                            full_p = os.path.abspath(os.path.join(root, f))
+                            last_file_sizes[full_p] = os.path.getsize(full_p)
+            except Exception:
+                pass
+
+        last_disk_check = time.time()
+
         while True:
+            # Check for disk activity periodically (every 2.0 seconds) to prevent false stall timeouts
+            current_time = time.time()
+            if current_time - last_disk_check >= 2.0:
+                last_disk_check = current_time
+                active_files = get_active_download_file_info(dest_path, downloaded_file_path)
+                size_increased = False
+                for path, current_size in active_files.items():
+                    prev_size = last_file_sizes.get(path)
+                    if prev_size is None:
+                        # New active file found
+                        if current_size > 0:
+                            size_increased = True
+                    elif current_size > prev_size:
+                        # Existing file size increased
+                        size_increased = True
+                    last_file_sizes[path] = current_size
+                
+                if size_increased:
+                    last_activity = current_time
+
             # Use file descriptors for select to bypass TextIOWrapper buffering issues
             inputs = [process.stdout.fileno()]
             if sys.stdin.isatty():
@@ -434,16 +501,38 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
             termios.tcsetattr(sys.stdin, termios.TCSANOW, old_settings)
 
         # Cleanup partial files if the job didn't finish successfully
-        if not job_succeeded and downloaded_file_path:
+        if not job_succeeded:
             # Brief sleep to ensure file handles are released after process termination
             time.sleep(0.5)
-            incomplete_path = f"{downloaded_file_path}.incomplete"
-            if os.path.exists(incomplete_path):
+            
+            incomplete_paths = []
+            if downloaded_file_path:
+                incomplete_paths.append(f"{downloaded_file_path}.incomplete")
+                
+            if 'last_file_sizes' in locals():
+                for path in last_file_sizes.keys():
+                    if path.endswith('.incomplete'):
+                        incomplete_paths.append(path)
+                        
+            if os.path.isdir(dest_path):
                 try:
-                    os.remove(incomplete_path)
-                    progress.console.log(f"[bold yellow]🧹 Removed partial file: {os.path.basename(incomplete_path)}[/]")
-                except Exception as cleanup_err:
-                    progress.console.log(f"[bold red]⚠️ Cleanup failed for {os.path.basename(incomplete_path)}: {cleanup_err}[/]")
+                    for root, _, files in os.walk(dest_path):
+                        for f in files:
+                            if f.endswith('.incomplete'):
+                                incomplete_paths.append(os.path.join(root, f))
+                except Exception:
+                    pass
+            
+            # Deduplicate paths
+            unique_incomplete = list(set(os.path.abspath(p) for p in incomplete_paths))
+            
+            for incomplete_path in unique_incomplete:
+                if os.path.exists(incomplete_path):
+                    try:
+                        os.remove(incomplete_path)
+                        progress.console.log(f"[bold yellow]🧹 Removed partial file: {os.path.basename(incomplete_path)}[/]")
+                    except Exception as cleanup_err:
+                        progress.console.log(f"[bold red]⚠️ Cleanup failed for {os.path.basename(incomplete_path)}: {cleanup_err}[/]")
 
 def main():
     parser = argparse.ArgumentParser(description="Download Beatport Top 100 via local sockseek.")
