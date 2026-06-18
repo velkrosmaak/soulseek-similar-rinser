@@ -78,6 +78,37 @@ class FileSizeColumn(ProgressColumn):
                 return Text(f"{format_size(completed)}/{format_size(total)}", style="cyan")
         return Text("")
 
+class NetworkIOLightColumn(ProgressColumn):
+    def render(self, task):
+        desc = str(task.description).lower()
+        if "downloading" in desc:
+            t = time.time()
+            
+            # Fetch fields safely
+            fields = getattr(task, 'fields', {}) or {}
+            
+            # RX activity (reading stdout / download updates)
+            last_rx_time = fields.get('last_rx_time', 0.0)
+            rx_count = fields.get('rx_count', 0)
+            if t - last_rx_time < 0.2:
+                rx = "🔵" if rx_count % 2 == 0 else "⚫"
+            else:
+                rx = "⚫"
+                
+            # TX activity (writing to disk / database update)
+            last_tx_time = fields.get('last_tx_time', 0.0)
+            if t - last_tx_time < 0.5:
+                tx = "🟢"
+            else:
+                tx = "⚫"
+                
+            return Text(f" [Link: {tx}{rx}]", style="bold")
+        elif "searching" in desc:
+            t = time.time()
+            state = "🟡" if int(t * 3) % 2 == 0 else "⚫"
+            return Text(f" [Scan: {state}]", style="bold")
+        return Text("")
+
 try:
     import pushover_config
 except ImportError:
@@ -430,6 +461,12 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
                 
                 if size_increased:
                     last_activity = current_time
+                    task = progress._tasks.get(task_id)
+                    if task:
+                        if not hasattr(task, 'fields') or task.fields is None:
+                            task.fields = {}
+                        task.fields['last_tx_time'] = current_time
+                        task.fields['tx_count'] = task.fields.get('tx_count', 0) + 1
 
             # Use file descriptors for select to bypass TextIOWrapper buffering issues
             inputs = [process.stdout.fileno()]
@@ -455,6 +492,14 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
                     break
 
                 last_activity = time.time()
+                
+                # Update task fields for accurate RX link light
+                task = progress._tasks.get(task_id)
+                if task:
+                    if not hasattr(task, 'fields') or task.fields is None:
+                        task.fields = {}
+                    task.fields['last_rx_time'] = last_activity
+                    task.fields['rx_count'] = task.fields.get('rx_count', 0) + 1
 
                 if char in ['\n', '\r']:
                     clean_line = buffer.strip()
@@ -620,6 +665,7 @@ def main():
         TimeElapsedColumn(),
         TimePerSongColumn(),
         FileSizeColumn(),
+        NetworkIOLightColumn(),
         console=console,
         expand=True
     ) as progress:
