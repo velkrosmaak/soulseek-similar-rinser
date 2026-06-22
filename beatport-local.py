@@ -534,7 +534,7 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
                         # sockseek often prints the path on the line following 'succeeded'
                         possible_path = None
                         if "songjob:" in lower_line:
-                            m = re.search(r"SongJob:.*?:.*?: (.*?)(?:\s+\(|$)", clean_line)
+                            m = re.search(r"SongJob:.*?:.*?: (.*)", clean_line)
                             if m and m.group(1).strip():
                                 potential = m.group(1).strip()
                                 if "\\" in potential or "/" in potential:
