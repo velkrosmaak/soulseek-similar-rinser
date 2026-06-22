@@ -6,6 +6,7 @@
 SCRIPT_DIR="/root/soulseek-similar-rinser"
 CONFIG_FILE="$SCRIPT_DIR/pushover_config.py"
 PYTHON_SCRIPT="$SCRIPT_DIR/beatport-local.py"
+LOG_FILE="$SCRIPT_DIR/rinse_all.log"
 
 if [ "$#" -ne 1 ]; then
     echo "Usage: $0 <genre_list_file>"
@@ -40,6 +41,7 @@ START_TIME=$(date +"%T")
 COUNT=$(wc -l < "$GENRE_FILE" | xargs)
 
 echo "🚀 Starting batch download for $COUNT genres..."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Batch process started for $COUNT genres" >> "$LOG_FILE"
 send_notification "Soulseek Batch Started" "Starting process for $COUNT genres at $START_TIME."
 
 while IFS= read -r genre || [[ -n "$genre" ]]; do
@@ -50,8 +52,14 @@ while IFS= read -r genre || [[ -n "$genre" ]]; do
     echo "🎵 Processing Genre: $genre"
     echo "--------------------------------------------------"
     
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Python script for genre: $genre" >> "$LOG_FILE"
+    START_CALL=$(date +%s)
     python3 "$PYTHON_SCRIPT" "$genre" --download
+    END_CALL=$(date +%s)
+    DURATION=$((END_CALL - START_CALL))
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Finished Python script for genre: $genre (Duration: ${DURATION}s)" >> "$LOG_FILE"
 done < "$GENRE_FILE"
 
 send_notification "Soulseek Batch Complete" "Finished processing all genres from $GENRE_FILE."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Batch process completed" >> "$LOG_FILE"
 echo "✅ Batch processing complete."
