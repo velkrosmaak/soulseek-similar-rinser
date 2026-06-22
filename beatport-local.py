@@ -632,8 +632,8 @@ def main():
         console.print(f"[bold red]❌ Unknown genre.[/] Choose from: [cyan]{', '.join(GENRE_MAP.keys())}[/]")
         sys.exit(1)
 
-    # Prettify the genre name (e.g., tech-house -> Tech House)
-    genre_display = GENRE_MAP[genre_key][0].replace('-', ' ').title()
+    # Use the input genre key directly (e.g., afro-house instead of Afro House)
+    genre_display = genre_key
     
     status_msg = f"Genre: [bold yellow]{genre_display}[/]\nStats: {get_db_stats()}"
     if args.dev:
