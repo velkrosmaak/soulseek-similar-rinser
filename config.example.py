@@ -19,6 +19,8 @@ PLEX_TOKEN = _getenv("PLEX_TOKEN", "your plex token")
 LASTFM_BASE_URL = _getenv("LASTFM_BASE_URL", "http://ws.audioscrobbler.com/2.0/")
 LASTFM_API_KEY = _getenv("LASTFM_API_KEY", "last fm api key")
 
+FLARESOLVERR_URL = _getenv("FLARESOLVERR_URL", "http://docker:8191/v1")
+
 
 def create_slskd_client() -> SlskdClient:
     """Create a Slskd client using the shared configuration."""

@@ -114,6 +114,11 @@ try:
 except ImportError:
     pushover_config = None
 
+try:
+    from config import FLARESOLVERR_URL
+except ImportError:
+    FLARESOLVERR_URL = ""
+
 console = Console()
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "beatport_downloads.db")
@@ -219,9 +224,21 @@ def get_beatport_top_100(genre_key: str) -> list[dict]:
     }
     
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', response.text)
+        if FLARESOLVERR_URL:
+            payload = {"cmd": "request.get", "url": url, "maxTimeout": 60000}
+            response = requests.post(FLARESOLVERR_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=65)
+            response.raise_for_status()
+            res_json = response.json()
+            if res_json.get("status") == "ok":
+                page_source = res_json.get("solution", {}).get("response", "")
+            else:
+                raise Exception(f"FlareSolverr error: {res_json.get('message')}")
+        else:
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            page_source = response.text
+
+        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', page_source)
         if not match: return []
 
         data = json.loads(match.group(1))
