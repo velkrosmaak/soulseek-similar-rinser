@@ -71,11 +71,39 @@ class TimePerSongColumn(ProgressColumn):
 
 class FileSizeColumn(ProgressColumn):
     def render(self, task):
-        if "downloading" in str(task.description).lower():
+        desc = str(task.description).lower()
+        fields = getattr(task, 'fields', {}) or {}
+        if "downloading" in desc:
             completed = task.completed
             total = task.total
-            if total is not None:
+            if total is not None and total > 0:
                 return Text(f"{format_size(completed)}/{format_size(total)}", style="cyan")
+            # Fallback: show the largest file size we've seen on disk
+            current_file_size = fields.get('current_file_size', 0)
+            if current_file_size > 0:
+                return Text(f"{format_size(current_file_size)}", style="cyan")
+        elif "searching" in desc:
+            current_file_size = fields.get('current_file_size', 0)
+            if current_file_size > 0:
+                return Text(f"{format_size(current_file_size)}", style="cyan dim")
+        return Text("")
+
+
+class TrackElapsedColumn(ProgressColumn):
+    """Shows per-track elapsed time on the lower (search/download) task line."""
+    def render(self, task):
+        desc = str(task.description).lower()
+        if "searching" in desc or "downloading" in desc or "converting" in desc:
+            fields = getattr(task, 'fields', {}) or {}
+            track_start = fields.get('track_start')
+            if track_start is not None:
+                elapsed = time.time() - track_start
+                mins = int(elapsed) // 60
+                secs = int(elapsed) % 60
+                if mins > 0:
+                    return Text(f"[{mins}m{secs:02d}s]", style="bright_magenta")
+                else:
+                    return Text(f"[{secs}s]", style="bright_magenta")
         return Text("")
 
 class NetworkIOLightColumn(ProgressColumn):
@@ -288,7 +316,7 @@ def convert_to_mp3(file_path: str, progress: Progress = None) -> str:
             progress.remove_task(task_id)
 
 def update_album_tag(file_path: str, album_name: str, progress: Progress = None):
-    """Update the album tag of the file to the genre name."""
+    """Update the album and year tags of the file to the genre name and current year."""
     if not HAS_MUTAGEN or not os.path.exists(file_path):
         return
     try:
@@ -297,6 +325,8 @@ def update_album_tag(file_path: str, album_name: str, progress: Progress = None)
         if audio is None:
             return
 
+        current_year = str(time.localtime().tm_year)
+
         # Handle MP3 (ID3)
         if file_path.lower().endswith(".mp3"):
             from mutagen.easyid3 import EasyID3
@@ -304,20 +334,23 @@ def update_album_tag(file_path: str, album_name: str, progress: Progress = None)
                 # EasyID3 provides a dictionary-like interface for common tags
                 audio = EasyID3(file_path)
                 audio['album'] = album_name
+                audio['date'] = current_year
                 audio.save()
             except:
                 # Fallback to standard ID3 if EasyID3 fails
-                from mutagen.id3 import ID3, TALB
+                from mutagen.id3 import ID3, TALB, TDRC
                 tags = ID3(file_path)
                 tags.add(TALB(encoding=3, text=album_name))
+                tags.add(TDRC(encoding=3, text=current_year))
                 tags.save()
         else:
             # Handle FLAC and others (Vorbis comments)
             audio['album'] = album_name
+            audio['date'] = current_year
             audio.save()
 
         if progress:
-            progress.console.log(f"[dim]  🏷️  Tagged album as '{album_name}'[/]")
+            progress.console.log(f"[dim]  🏷️  Tagged album as '{album_name}', year as {current_year}[/]")
     except Exception as e:
         if progress:
             progress.console.log(f"[bold red]⚠️  Tagging failed for {os.path.basename(file_path)}: {e}[/]")
@@ -401,7 +434,7 @@ def get_active_download_file_info(dest_path: str, downloaded_file_path: str | No
                 pass
     return active_files
 
-def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progress: Progress) -> tuple[bool, str | None, str | None]:
+def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progress: Progress, track_start_time: float | None = None) -> tuple[bool, str | None, str | None]:
     """Run the local sockseek command and monitor for remote queues."""
     query = f"{artist} {title}"
     if remix and "original" not in remix.lower():
@@ -419,7 +452,11 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
     ]
 
     # Start with total=None to show a pulsing "searching" bar until download starts
-    task_id = progress.add_task(f"[bold cyan]🔍 Searching: {query}", total=None)
+    task_id = progress.add_task(
+        f"[bold cyan]🔍 Searching: {query}",
+        total=None,
+        track_start=track_start_time if track_start_time is not None else time.time(),
+    )
     
     # Set up TTY for skip detection if possible
     old_settings = None
@@ -476,6 +513,16 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
                         size_increased = True
                     last_file_sizes[path] = current_size
                 
+                # Always update current_file_size so FileSizeColumn & TrackElapsedColumn can display it
+                task = progress._tasks.get(task_id)
+                if task:
+                    if not hasattr(task, 'fields') or task.fields is None:
+                        task.fields = {}
+                    # Track the largest single file size seen (proxy for the active download)
+                    if active_files:
+                        biggest = max(active_files.values())
+                        task.fields['current_file_size'] = biggest
+
                 if size_increased:
                     last_activity = current_time
                     task = progress._tasks.get(task_id)
@@ -682,6 +729,7 @@ def main():
         TimeElapsedColumn(),
         TimePerSongColumn(),
         FileSizeColumn(),
+        TrackElapsedColumn(),
         NetworkIOLightColumn(),
         console=console,
         expand=True
@@ -710,7 +758,8 @@ def main():
 
             # 2. Download
             if args.download:
-                success, r_user, f_path = run_sockseek(artist, title, remix, genre_display, progress)
+                track_start_time = time.time()
+                success, r_user, f_path = run_sockseek(artist, title, remix, genre_display, progress, track_start_time)
                 add_to_db(artist, title, remix, r_user, success)
                 if success:
                     progress.console.log(f"[bold magenta]{track_tag} 📦 Finished (User: {r_user or 'Unknown'})[/]")
