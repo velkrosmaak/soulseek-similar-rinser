@@ -492,6 +492,8 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
                             last_file_sizes[full_p] = os.path.getsize(full_p)
             except Exception:
                 pass
+        # Snapshot of files that existed before this download started — excluded from size display
+        initial_file_set = set(last_file_sizes.keys())
 
         last_disk_check = time.time()
 
@@ -513,15 +515,19 @@ def run_sockseek(artist: str, title: str, remix: str, genre_folder: str, progres
                         size_increased = True
                     last_file_sizes[path] = current_size
                 
-                # Always update current_file_size so FileSizeColumn & TrackElapsedColumn can display it
+                # Always update current_file_size so FileSizeColumn can display it.
+                # Only consider files that appeared AFTER the download started (not pre-existing
+                # audio files in the folder which would give a false/stale size reading).
                 task = progress._tasks.get(task_id)
                 if task:
                     if not hasattr(task, 'fields') or task.fields is None:
                         task.fields = {}
-                    # Track the largest single file size seen (proxy for the active download)
-                    if active_files:
-                        biggest = max(active_files.values())
-                        task.fields['current_file_size'] = biggest
+                    new_files = {
+                        path: size for path, size in active_files.items()
+                        if path not in initial_file_set or path.endswith('.incomplete')
+                    }
+                    if new_files:
+                        task.fields['current_file_size'] = max(new_files.values())
 
                 if size_increased:
                     last_activity = current_time
