@@ -603,37 +603,88 @@ def convert_to_mp3(file_path: str, state: TrackState = None) -> str:
 
 
 def update_album_tag(file_path: str, album_name: str, state: TrackState = None):
-    """Update the album and year tags to the playlist friendly name and current year."""
+    """Update album, year, and artist tags for playlist compatibility."""
     if not HAS_MUTAGEN or not os.path.exists(file_path):
         return
+
     try:
         from mutagen import File as MutagenFile
-        audio = MutagenFile(file_path)
-        if audio is None:
-            return
 
         current_year = str(time.localtime().tm_year)
 
         if file_path.lower().endswith(".mp3"):
             from mutagen.easyid3 import EasyID3
+
             try:
-                audio          = EasyID3(file_path)
-                audio['album'] = album_name
-                audio['date']  = current_year
+                audio = EasyID3(file_path)
+
+                # Update album/year
+                audio["album"] = album_name
+                audio["date"] = current_year
+
+                # If artist is missing, copy albumartist
+                artist = audio.get("artist", [])
+                albumartist = audio.get("albumartist", [])
+
+                if (not artist or not any(a.strip() for a in artist)) and albumartist:
+                    audio["artist"] = albumartist
+
+                # Always set album artist to Beatport
+                audio["albumartist"] = ["Beatport"]
+
                 audio.save()
+
             except Exception:
-                from mutagen.id3 import ID3, TALB, TDRC
+                from mutagen.id3 import ID3, TALB, TDRC, TPE1, TPE2
+
                 tags = ID3(file_path)
+
+                # Update album/year
                 tags.add(TALB(encoding=3, text=album_name))
                 tags.add(TDRC(encoding=3, text=current_year))
+
+                # Get current artist/album artist
+                artist_frame = tags.get("TPE1")
+                albumartist_frame = tags.get("TPE2")
+
+                artist_text = artist_frame.text if artist_frame else []
+                albumartist_text = albumartist_frame.text if albumartist_frame else []
+
+                # If artist missing, copy album artist
+                if (not artist_text or not any(t.strip() for t in artist_text)) and albumartist_text:
+                    tags.setall("TPE1", [TPE1(encoding=3, text=albumartist_text)])
+
+                # Always set album artist to Beatport
+                tags.setall("TPE2", [TPE2(encoding=3, text="Beatport")])
+
                 tags.save()
+
         else:
-            audio['album'] = album_name
-            audio['date']  = current_year
+            audio = MutagenFile(file_path)
+            if audio is None:
+                return
+
+            # Update album/year
+            audio["album"] = album_name
+            audio["date"] = current_year
+
+            # If artist is missing, copy albumartist
+            artist = audio.get("artist", [])
+            albumartist = audio.get("albumartist", [])
+
+            if (not artist or not any(str(a).strip() for a in artist)) and albumartist:
+                audio["artist"] = albumartist
+
+            # Always set album artist to Beatport
+            audio["albumartist"] = ["Beatport"]
+
             audio.save()
 
         if state:
-            state.log(f"[dim]  🏷️   Tagged: album='{album_name}'  year={current_year}[/dim]")
+            state.log(
+                f"[dim]  🏷️   Tagged: album='{album_name}'  year={current_year}  albumartist='Beatport'[/dim]"
+            )
+
     except Exception as e:
         if state:
             state.log(f"[bold red]⚠️   Tagging failed: {e}[/bold red]")
