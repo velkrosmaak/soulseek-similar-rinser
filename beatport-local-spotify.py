@@ -50,7 +50,7 @@ except ImportError:
 
 console = Console()
 
-DB_PATH        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "beatport_downloads.db")
+DB_PATH        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spotify_downloads.db")
 QUEUED_TIMEOUT = 60   # Seconds to wait if remotely queued before giving up
 STALL_TIMEOUT  = 60   # Seconds of dead air before assuming stuck
 
@@ -349,50 +349,45 @@ class SpotifyApp(App):
 # ─────────────────────────────────────────────
 
 def init_db():
-    """Initialize the SQLite database for tracking downloads."""
+    """Initialize the SQLite database (spotify_downloads.db) for tracking downloads."""
     conn   = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS downloads (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            artist    TEXT,
-            title     TEXT,
-            remix     TEXT,
-            username  TEXT,
-            success   BOOLEAN,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp         DATETIME DEFAULT CURRENT_TIMESTAMP,
+            artist            TEXT,
+            track             TEXT,
+            remix             TEXT,
+            genre             TEXT,
+            username          TEXT,
+            download_success  BOOLEAN
         )
     ''')
-    cursor.execute("PRAGMA table_info(downloads)")
-    cols = [c[1] for c in cursor.fetchall()]
-    if 'username' not in cols:
-        cursor.execute("ALTER TABLE downloads ADD COLUMN username TEXT")
-    if 'success' not in cols:
-        cursor.execute("ALTER TABLE downloads ADD COLUMN success BOOLEAN DEFAULT 1")
     conn.commit()
     conn.close()
 
 
-def track_exists(artist: str, title: str, remix: str) -> bool:
-    """Check if a track has already been successfully downloaded."""
+def track_exists(artist: str, title: str, remix: str, genre: str) -> bool:
+    """Check if a track has already been successfully downloaded (within this genre/playlist)."""
     conn   = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        'SELECT 1 FROM downloads WHERE artist=? AND title=? AND remix=? AND success=1',
-        (artist, title, remix),
+        'SELECT 1 FROM downloads WHERE artist=? AND track=? AND remix=? AND genre=? AND download_success=1',
+        (artist, title, remix, genre),
     )
     exists = cursor.fetchone() is not None
     conn.close()
     return exists
 
 
-def add_to_db(artist: str, title: str, remix: str, username: str = None, success: bool = True):
+def add_to_db(artist: str, title: str, remix: str, genre: str, username: str = None, success: bool = True):
     """Log a download attempt to the database."""
     conn   = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        'INSERT INTO downloads (artist,title,remix,username,success) VALUES (?,?,?,?,?)',
-        (artist, title, remix, username, int(success)),
+        'INSERT INTO downloads (artist,track,remix,genre,username,download_success) VALUES (?,?,?,?,?,?)',
+        (artist, title, remix, genre, username, int(success)),
     )
     conn.commit()
     conn.close()
@@ -402,9 +397,9 @@ def get_db_stats() -> tuple[int, int]:
     """Return (success_count, failure_count) from the database."""
     conn   = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM downloads WHERE success=1')
+    cursor.execute('SELECT COUNT(*) FROM downloads WHERE download_success=1')
     s = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM downloads WHERE success=0')
+    cursor.execute('SELECT COUNT(*) FROM downloads WHERE download_success=0')
     f = cursor.fetchone()[0]
     conn.close()
     return s, f
@@ -1072,7 +1067,7 @@ def main():
             )
 
             # DB check
-            if track_exists(artist, title, remix):
+            if track_exists(artist, title, remix, friendly_display):
                 state.log(f"[blue]💾  {tag} {artist} — {title}  [dim](already in DB)[/dim][/blue]")
                 state.update_fields(status="owned", already_owned=state.already_owned + 1)
                 continue
@@ -1084,7 +1079,7 @@ def main():
                 success, r_user, f_path = run_sockseek(
                     artist, title, remix, friendly_display, state, track_start,
                 )
-                add_to_db(artist, title, remix, r_user, success)
+                add_to_db(artist, title, remix, friendly_display, r_user, success)
 
                 was_skipped = state.skip_requested
                 state.update_fields(skip_requested=False)
