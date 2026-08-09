@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-soulseek-similar-rinser/beatport-local-spotify.py
-Fetch Spotify playlist tracks and download missing tracks via local sockseek CLI.
+soulseek-similar-rinser/spotify-liked-rinser.py
+Fetch all Spotify Liked Tracks (Saved Tracks) via Spotify API, store in spotify_liked.db,
+and download missing/failed tracks via local sockseek CLI.
 """
 
 import argparse
@@ -35,6 +36,13 @@ except ImportError:
     print("❌  Textual not installed. Run:  pip install textual")
     sys.exit(1)
 
+try:
+    import spotipy
+    from spotipy.oauth2 import SpotifyOAuth
+    HAS_SPOTIPY = True
+except ImportError:
+    HAS_SPOTIPY = False
+
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -46,14 +54,24 @@ except ImportError:
     pushover_config = None
 
 try:
-    from config import FLARESOLVERR_URL
+    import config
+    FLARESOLVERR_URL = getattr(config, "FLARESOLVERR_URL", "")
+    SPOTIFY_CLIENT_ID = getattr(config, "SPOTIFY_CLIENT_ID", "")
+    SPOTIFY_CLIENT_SECRET = getattr(config, "SPOTIFY_CLIENT_SECRET", "")
+    SPOTIFY_REDIRECT_URI = getattr(config, "SPOTIFY_REDIRECT_URI", "http://127.0.0.1:9090")
 except ImportError:
     FLARESOLVERR_URL = ""
+    SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
+    SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
+    SPOTIFY_REDIRECT_URI = os.environ.get("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:9090")
 
 console = Console()
 
-DB_PATH        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spotify_downloads.db")
-LOG_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)), "beatport-local-spotify.log")
+SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
+DB_PATH        = os.path.join(SCRIPT_DIR, "spotify_liked.db")
+LOG_PATH       = os.path.join(SCRIPT_DIR, "spotify-liked.log")
+CACHE_PATH     = os.path.join(SCRIPT_DIR, ".cache-spotify-liked")
+DEFAULT_DEST   = "/media/quark/dj/spotify liked"
 QUEUED_TIMEOUT = 60   # Seconds to wait if remotely queued before giving up
 STALL_TIMEOUT  = 60   # Seconds of dead air before assuming stuck
 
@@ -62,33 +80,18 @@ STALL_TIMEOUT  = 60   # Seconds of dead air before assuming stuck
 #  Real-time file logging
 # ─────────────────────────────────────────────
 
-# Current playlist/genre, shown next to every timestamp. Updated once the
-# friendly playlist name is known (see main()).
-_CURRENT_GENRE = "-"
-
-
-class _GenreFilter(logging.Filter):
-    """Injects the currently-active genre/playlist name into every log record."""
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.genre = _CURRENT_GENRE
-        return True
-
-
 def _setup_file_logger() -> logging.Logger:
-    """Set up a logger that writes timestamped events to beatport-local-spotify.log
-    in the same directory as this script. Each record is flushed immediately so the
-    file can be tailed (e.g. `tail -f`) while the script is running."""
-    logger = logging.getLogger("beatport_local_spotify")
+    """Set up a logger that writes timestamped events to spotify-liked.log."""
+    logger = logging.getLogger("spotify_liked")
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
     if not logger.handlers:
         handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
         handler.setFormatter(logging.Formatter(
-            fmt="%(asctime)s [%(genre)s] %(message)s",
+            fmt="%(asctime)s [Liked Tracks] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         ))
-        handler.addFilter(_GenreFilter())
         logger.addHandler(handler)
 
     return logger
@@ -98,8 +101,7 @@ file_logger = _setup_file_logger()
 
 
 def _plain(message: str) -> str:
-    """Strip Rich markup tags (e.g. [bold red]...[/bold red]) down to plain text
-    for writing into the log file."""
+    """Strip Rich markup tags down to plain text for writing into the log file."""
     try:
         return Text.from_markup(message).plain.strip()
     except Exception:
@@ -107,8 +109,7 @@ def _plain(message: str) -> str:
 
 
 def log_event(message: str) -> None:
-    """Write a plain-text, timestamped event straight to the log file (for events
-    that happen outside of the TrackState/TUI, e.g. startup, fatal errors)."""
+    """Write a plain-text, timestamped event straight to the log file."""
     plain = _plain(message)
     if plain:
         file_logger.info(plain)
@@ -144,7 +145,7 @@ def elapsed_str(start: float) -> str:
 @dataclass
 class TrackState:
     """Thread-safe shared state between the download worker and the Textual UI."""
-    genre: str = ""
+    genre: str = "Liked Tracks"
     total_tracks: int = 0
     dev_mode: bool = False
 
@@ -201,10 +202,10 @@ Screen {
     dock: top;
     height: 3;
     background: #10102a;
-    border-bottom: solid #6d28d9;
+    border-bottom: solid #1db954;
     padding: 0 2;
     content-align: left middle;
-    color: #c4b5fd;
+    color: #1db954;
     text-style: bold;
 }
 
@@ -212,7 +213,7 @@ Screen {
     height: 9;
     margin: 1 1 0 1;
     padding: 1 2;
-    border: round #7c3aed;
+    border: round #1db954;
     background: #0c0c20;
 }
 
@@ -236,7 +237,7 @@ Screen {
 #history-header {
     height: 1;
     margin: 1 2 0 2;
-    color: #8b5cf6;
+    color: #1db954;
     text-style: bold;
 }
 
@@ -250,11 +251,11 @@ Screen {
 
 Footer {
     background: #10102a;
-    color: #7c3aed;
+    color: #1db954;
 }
 
 ProgressBar > .bar--bar {
-    color: #7c3aed;
+    color: #1db954;
 }
 ProgressBar > .bar--complete {
     color: #10b981;
@@ -265,9 +266,9 @@ ProgressBar > .bar--indeterminate {
 """
 
 
-class SpotifyApp(App):
+class SpotifyLikedApp(App):
     CSS = APP_CSS
-    TITLE = "Spotify Rinser"
+    TITLE = "Spotify Liked Tracks Rinser"
     BINDINGS = [
         ("s", "skip_track", "Skip Track"),
         ("q", "quit_app",   "Quit"),
@@ -324,11 +325,9 @@ class SpotifyApp(App):
 
     def _render_header(self) -> str:
         s = self.state
-        genre = f"[bold yellow]{s.genre}[/bold yellow]" if s.genre else "[dim]—[/dim]"
-        dev   = "  [bold red]⚠ DEV MODE[/bold red]" if s.dev_mode else ""
+        dev = "  [bold red]⚠ DEV MODE[/bold red]" if s.dev_mode else ""
         return (
-            f"🎵  [bold]Spotify Rinser[/bold]"
-            f"   ·   Playlist: {genre}"
+            f"💚  [bold]Spotify Liked Tracks Rinser[/bold]"
             f"   ·   [dim]Track [bold white]{s.track_num}[/bold white]/{s.total_tracks}[/dim]"
             f"{dev}"
         )
@@ -389,8 +388,8 @@ class SpotifyApp(App):
             filled = int(bar_w * pct)
             bar    = "█" * filled + "░" * (bar_w - filled)
             lines.append(
-                f"  ⬇️   [bold magenta]{bar}[/bold magenta]"
-                f" [bright_magenta]{pct * 100:.0f}%[/bright_magenta]"
+                f"  ⬇️   [bold green]{bar}[/bold green]"
+                f" [bright_green]{pct * 100:.0f}%[/bright_green]"
             )
 
         return "\n".join(lines)
@@ -405,96 +404,128 @@ class SpotifyApp(App):
 
 
 # ─────────────────────────────────────────────
-#  Database
+#  Database Management (spotify_liked.db)
 # ─────────────────────────────────────────────
 
-def init_db():
-    """Initialize the SQLite database (spotify_downloads.db) for tracking downloads."""
+def init_liked_db():
+    """Initialize SQLite database spotify_liked.db for tracking liked track downloads."""
     conn   = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS downloads (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp         DATETIME DEFAULT CURRENT_TIMESTAMP,
-            artist            TEXT,
-            track             TEXT,
-            remix             TEXT,
-            genre             TEXT,
-            username          TEXT,
-            download_success  BOOLEAN
+        CREATE TABLE IF NOT EXISTS liked_tracks (
+            spotify_id          TEXT PRIMARY KEY,
+            artist              TEXT NOT NULL,
+            title               TEXT NOT NULL,
+            remix               TEXT,
+            album               TEXT,
+            added_at            TEXT,
+            download_status     TEXT DEFAULT 'pending',
+            download_timestamp  DATETIME,
+            username            TEXT,
+            file_path           TEXT,
+            error_message       TEXT
         )
     ''')
     conn.commit()
     conn.close()
 
 
-def track_exists(artist: str, title: str, remix: str, genre: str) -> bool:
-    """Check if a track has already been successfully downloaded (within this genre/playlist)."""
+def sync_liked_tracks_to_db(tracks: list[dict]) -> tuple[int, int]:
+    """
+    Insert new liked tracks into spotify_liked.db.
+    Returns (total_tracks_count, new_tracks_added_count).
+    """
     conn   = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute(
-        'SELECT 1 FROM downloads WHERE artist=? AND track=? AND remix=? AND genre=? AND download_success=1',
-        (artist, title, remix, genre),
-    )
-    exists = cursor.fetchone() is not None
+    
+    new_added = 0
+    for t in tracks:
+        sid      = t["spotify_id"]
+        artist   = t["artist"]
+        title    = t["title"]
+        remix    = t["remix"]
+        album    = t.get("album", "")
+        added_at = t.get("added_at", "")
+
+        cursor.execute("SELECT download_status FROM liked_tracks WHERE spotify_id=?", (sid,))
+        row = cursor.fetchone()
+
+        if row is None:
+            cursor.execute('''
+                INSERT INTO liked_tracks (spotify_id, artist, title, remix, album, added_at, download_status)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending')
+            ''', (sid, artist, title, remix, album, added_at))
+            new_added += 1
+        else:
+            # Update metadata in case title/artist changed, preserve download_status
+            cursor.execute('''
+                UPDATE liked_tracks
+                SET artist=?, title=?, remix=?, album=?, added_at=?
+                WHERE spotify_id=?
+            ''', (artist, title, remix, album, added_at, sid))
+
+    conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM liked_tracks")
+    total_count = cursor.fetchone()[0]
+
     conn.close()
-    return exists
+    return total_count, new_added
 
 
-def add_to_db(artist: str, title: str, remix: str, genre: str, username: str = None, success: bool = True):
-    """Log a download attempt to the database."""
+def get_tracks_for_download(retry_failed: bool = False) -> list[dict]:
+    """Retrieve tracks that have status 'pending' (or also 'failed' if retry_failed=True)."""
+    conn   = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    if retry_failed:
+        cursor.execute("SELECT * FROM liked_tracks WHERE download_status IN ('pending', 'failed') ORDER BY added_at DESC")
+    else:
+        cursor.execute("SELECT * FROM liked_tracks WHERE download_status = 'pending' ORDER BY added_at DESC")
+
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_track_status(spotify_id: str, status: str, username: str = None, file_path: str = None, error: str = None):
+    """Update the download status and metadata for a specific track in spotify_liked.db."""
     conn   = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute(
-        'INSERT INTO downloads (artist,track,remix,genre,username,download_success) VALUES (?,?,?,?,?,?)',
-        (artist, title, remix, genre, username, int(success)),
-    )
+    now    = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    cursor.execute('''
+        UPDATE liked_tracks
+        SET download_status=?, download_timestamp=?, username=?, file_path=?, error_message=?
+        WHERE spotify_id=?
+    ''', (status, now, username, file_path, error, spotify_id))
+
     conn.commit()
     conn.close()
 
 
-def get_db_stats() -> tuple[int, int]:
-    """Return (success_count, failure_count) from the database."""
+def get_liked_db_stats() -> dict[str, int]:
+    """Return dictionary with counts of tracks by download_status."""
     conn   = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM downloads WHERE download_success=1')
-    s = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM downloads WHERE download_success=0')
-    f = cursor.fetchone()[0]
+
+    stats = {"total": 0, "success": 0, "failed": 0, "skipped": 0, "pending": 0}
+    cursor.execute("SELECT download_status, COUNT(*) FROM liked_tracks GROUP BY download_status")
+    for status, count in cursor.fetchall():
+        if status in stats:
+            stats[status] = count
+
+    cursor.execute("SELECT COUNT(*) FROM liked_tracks")
+    stats["total"] = cursor.fetchone()[0]
+
     conn.close()
-    return s, f
+    return stats
 
 
 # ─────────────────────────────────────────────
-#  Spotify List Config & Scraping
+#  Spotify API Retrieval
 # ─────────────────────────────────────────────
-
-def read_spotify_lists() -> dict[str, tuple[str, str]]:
-    """Read spotify_lists.txt and return a dictionary mapping friendly_name (lowercase) to (spotify_url, friendly_name)."""
-    lists_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spotify_lists.txt")
-    mapping = {}
-    if not os.path.exists(lists_path):
-        return mapping
-    
-    with open(lists_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split(None, 1)
-            if len(parts) == 2:
-                url, friendly = parts
-                mapping[friendly.strip().lower()] = (url.strip(), friendly.strip())
-    return mapping
-
-
-def extract_playlist_id(url: str) -> str | None:
-    """Extract Spotify playlist ID from standard, embed, or URI formats."""
-    m = re.search(r'(?:playlist/|playlist:)([a-zA-Z0-9]+)', url)
-    if m:
-        return m.group(1)
-    return None
-
 
 def parse_spotify_title(spotify_title: str) -> tuple[str, str]:
     """Extract clean title and remix info from a Spotify track title."""
@@ -551,76 +582,96 @@ def parse_spotify_title(spotify_title: str) -> tuple[str, str]:
         return current_title, "Original Mix"
 
 
-def get_spotify_playlist_tracks(spotify_url: str) -> list[dict]:
-    """Fetch Spotify playlist tracks from the embed page, falling back to FlareSolverr if needed."""
-    playlist_id = extract_playlist_id(spotify_url)
-    if not playlist_id:
-        console.print(f"[bold red]❌ Failed to parse playlist ID from: {spotify_url}[/]")
+def fetch_spotify_liked_tracks(dev_mode: bool = False) -> list[dict]:
+    """Fetch all saved (liked) tracks for the authenticated Spotify user using spotipy."""
+    if not HAS_SPOTIPY:
+        console.print("[bold red]❌  spotipy is not installed. Install with: pip install spotipy[/]")
+        log_event("[bold red]❌  spotipy is not installed. Aborting run.[/bold red]")
         return []
 
-    url = f"https://open.spotify.com/embed/playlist/{playlist_id}"
-    headers = {
-        "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+    client_id     = SPOTIFY_CLIENT_ID
+    client_secret = SPOTIFY_CLIENT_SECRET
+    redirect_uri  = SPOTIFY_REDIRECT_URI
+
+    if not client_id or not client_secret:
+        console.print(
+            "[bold red]❌ Spotify API credentials missing.[/]\n"
+            "[yellow]Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in config.py or environment variables.[/]"
+        )
+        log_event("[bold red]❌  Spotify API credentials missing in config.py / environment.[/bold red]")
+        return []
 
     try:
-        if FLARESOLVERR_URL:
-            payload  = {"cmd": "request.get", "url": url, "maxTimeout": 60000}
-            response = requests.post(FLARESOLVERR_URL, json=payload,
-                                     headers={"Content-Type": "application/json"}, timeout=65)
-            response.raise_for_status()
-            res_json = response.json()
-            if res_json.get("status") == "ok":
-                page_source = res_json.get("solution", {}).get("response", "")
-            else:
-                raise Exception(f"FlareSolverr error: {res_json.get('message')}")
-        else:
-            response = requests.get(url, headers=headers, timeout=15)
-            response.raise_for_status()
-            page_source = response.text
-
-        match = re.search(
-            r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
-            page_source,
-            re.DOTALL
+        auth_manager = SpotifyOAuth(
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=redirect_uri,
+            scope="user-library-read",
+            cache_path=CACHE_PATH,
+            open_browser=False,
         )
-        if not match:
-            console.print("[bold red]❌  Could not find __NEXT_DATA__ script in Spotify embed response.[/]")
-            return []
+        sp = spotipy.Spotify(auth_manager=auth_manager)
 
-        data = json.loads(match.group(1).strip())
-        pageProps = data.get("props", {}).get("pageProps", {})
-        
-        if pageProps.get("status") == 404:
-            raise Exception("Spotify returned a 404 status in Next.js pageProps")
-            
-        entity = pageProps.get("state", {}).get("data", {}).get("entity", {})
-        track_list = entity.get("trackList", [])
-        
+        console.print("[bold magenta]🎵  Fetching Spotify Liked Tracks via API…[/]")
+        log_event("[cyan]🎵  Fetching Spotify Liked Tracks via API…[/cyan]")
+
         tracks = []
-        for t in track_list:
-            spotify_title = t.get("title", "")
-            artists = t.get("subtitle", "")
-            
-            clean_title, remix = parse_spotify_title(spotify_title)
-            
-            tracks.append({
-                "artist": artists,
-                "title":  clean_title,
-                "remix":  remix,
-            })
-            
+        limit  = 50
+        offset = 0
+
+        while True:
+            results = sp.current_user_saved_tracks(limit=limit, offset=offset)
+            items   = results.get("items", [])
+
+            if not items:
+                break
+
+            for item in items:
+                track = item.get("track")
+                if not track:
+                    continue
+
+                sid          = track.get("id") or track.get("uri", "").split(":")[-1]
+                raw_artists  = track.get("artists", [])
+                artist_names = ", ".join(a.get("name", "") for a in raw_artists if a.get("name"))
+                spotify_name = track.get("name", "")
+                album_name   = track.get("album", {}).get("name", "")
+                added_at     = item.get("added_at", "")
+
+                clean_title, remix = parse_spotify_title(spotify_name)
+
+                tracks.append({
+                    "spotify_id": sid,
+                    "artist":     artist_names,
+                    "title":      clean_title,
+                    "remix":      remix,
+                    "album":      album_name,
+                    "added_at":   added_at,
+                })
+
+                if dev_mode and len(tracks) >= 5:
+                    break
+
+            if dev_mode and len(tracks) >= 5:
+                break
+
+            if not results.get("next"):
+                break
+
+            offset += limit
+
+        console.print(f"[bold green]✅  Fetched {len(tracks)} liked tracks from Spotify API.[/]")
+        log_event(f"[bold green]✅  Fetched {len(tracks)} liked tracks from Spotify API.[/bold green]")
         return tracks
 
     except Exception as e:
-        console.print(f"[bold red]❌ Failed to fetch Spotify tracks: {e}[/]")
+        console.print(f"[bold red]❌ Spotify API error: {e}[/]")
+        log_event(f"[bold red]❌  Spotify API error: {e}[/bold red]")
         return []
 
 
 # ─────────────────────────────────────────────
-#  Audio helpers
+#  Audio Helpers
 # ─────────────────────────────────────────────
 
 def convert_to_mp3(file_path: str, state: TrackState = None) -> str:
@@ -657,7 +708,7 @@ def convert_to_mp3(file_path: str, state: TrackState = None) -> str:
         return file_path
 
 
-def update_album_tag(file_path: str, album_name: str, state: TrackState = None):
+def update_album_tag(file_path: str, album_name: str = "Spotify Liked Tracks", state: TrackState = None):
     """Update album, year, and artist tags for playlist compatibility."""
     if not HAS_MUTAGEN or not os.path.exists(file_path):
         return
@@ -672,46 +723,35 @@ def update_album_tag(file_path: str, album_name: str, state: TrackState = None):
 
             try:
                 audio = EasyID3(file_path)
-
-                # Update album/year
                 audio["album"] = album_name
                 audio["date"] = current_year
 
-                # If artist is missing, copy albumartist
                 artist = audio.get("artist", [])
                 albumartist = audio.get("albumartist", [])
 
                 if (not artist or not any(a.strip() for a in artist)) and albumartist:
                     audio["artist"] = albumartist
 
-                # Always set album artist to Beatport
-                audio["albumartist"] = ["Beatport"]
-
+                audio["albumartist"] = ["Spotify Liked"]
                 audio.save()
 
             except Exception:
                 from mutagen.id3 import ID3, TALB, TDRC, TPE1, TPE2
 
                 tags = ID3(file_path)
-
-                # Update album/year
                 tags.add(TALB(encoding=3, text=album_name))
                 tags.add(TDRC(encoding=3, text=current_year))
 
-                # Get current artist/album artist
                 artist_frame = tags.get("TPE1")
                 albumartist_frame = tags.get("TPE2")
 
                 artist_text = artist_frame.text if artist_frame else []
                 albumartist_text = albumartist_frame.text if albumartist_frame else []
 
-                # If artist missing, copy album artist
                 if (not artist_text or not any(t.strip() for t in artist_text)) and albumartist_text:
                     tags.setall("TPE1", [TPE1(encoding=3, text=albumartist_text)])
 
-                # Always set album artist to Beatport
-                tags.setall("TPE2", [TPE2(encoding=3, text="Beatport")])
-
+                tags.setall("TPE2", [TPE2(encoding=3, text="Spotify Liked")])
                 tags.save()
 
         else:
@@ -719,25 +759,21 @@ def update_album_tag(file_path: str, album_name: str, state: TrackState = None):
             if audio is None:
                 return
 
-            # Update album/year
             audio["album"] = album_name
             audio["date"] = current_year
 
-            # If artist is missing, copy albumartist
             artist = audio.get("artist", [])
             albumartist = audio.get("albumartist", [])
 
             if (not artist or not any(str(a).strip() for a in artist)) and albumartist:
                 audio["artist"] = albumartist
 
-            # Always set album artist to Beatport
-            audio["albumartist"] = ["Beatport"]
-
+            audio["albumartist"] = ["Spotify Liked"]
             audio.save()
 
         if state:
             state.log(
-                f"[dim]  🏷️   Tagged: album='{album_name}'  year={current_year}  albumartist='Beatport'[/dim]"
+                f"[dim]  🏷️   Tagged: album='{album_name}'  year={current_year}  albumartist='Spotify Liked'[/dim]"
             )
 
     except Exception as e:
@@ -752,8 +788,8 @@ def update_album_tag(file_path: str, album_name: str, state: TrackState = None):
 def send_pushover_notification(title: str, message: str):
     """Send a notification via Pushover."""
     if (not pushover_config
-            or not pushover_config.PUSHOVER_API_TOKEN
-            or not pushover_config.PUSHOVER_USER_KEY):
+            or not getattr(pushover_config, "PUSHOVER_API_TOKEN", None)
+            or not getattr(pushover_config, "PUSHOVER_USER_KEY", None)):
         console.log("[bold yellow]⚠️ Pushover skipped: credentials missing.[/]")
         return
     try:
@@ -776,7 +812,7 @@ def send_pushover_notification(title: str, message: str):
 
 
 # ─────────────────────────────────────────────
-#  Download engine
+#  Download Engine
 # ─────────────────────────────────────────────
 
 def parse_size_to_bytes(value: str, unit: str) -> int:
@@ -787,7 +823,7 @@ def parse_size_to_bytes(value: str, unit: str) -> int:
 
 def get_active_download_file_info(dest_path: str, downloaded_file_path: str | None) -> dict[str, int]:
     """Find in-progress audio files in dest_path and return path→size."""
-    AUDIO_EXTS    = {'.mp3', '.flac', '.m4a', '.mp4', '.ogg', '.opus', '.wav'}
+    AUDIO_EXTS     = {'.mp3', '.flac', '.m4a', '.mp4', '.ogg', '.opus', '.wav'}
     files_to_check = []
 
     if downloaded_file_path:
@@ -824,7 +860,7 @@ def run_sockseek(
     artist: str,
     title: str,
     remix: str,
-    genre_folder: str,
+    dest_path: str,
     state: TrackState,
     track_start_time: float | None = None,
 ) -> tuple[bool, str | None, str | None]:
@@ -834,11 +870,11 @@ def run_sockseek(
         query += f" {remix}"
     query = re.sub(r'[\W_]+', ' ', query).strip()
 
-    dest_path = f"/media/quark/dj/beatport top 100/{genre_folder}"
+    os.makedirs(dest_path, exist_ok=True)
     cmd = [
         "./sockseek", query,
         "-p", dest_path,
-        "--user", "velkrosmaak1",
+        "--user", "velkrosmaak3",
         "--pass", "1Ndustry",
     ]
 
@@ -871,7 +907,6 @@ def run_sockseek(
         last_activity     = time.time()
         buffer            = ""
 
-        # Snapshot existing files to avoid false stall/size readings
         AUDIO_EXTS      = {'.mp3', '.flac', '.m4a', '.mp4', '.ogg', '.opus', '.wav'}
         last_file_sizes = {}
         if os.path.isdir(dest_path):
@@ -887,7 +922,6 @@ def run_sockseek(
         last_disk_check  = time.time()
 
         while True:
-            # Skip / quit flags set by Textual key bindings
             if state.skip_requested or state.quit_requested:
                 state.log(f"[bold yellow]⏩  Killing: {artist} — {title}[/bold yellow]")
                 try:
@@ -896,7 +930,6 @@ def run_sockseek(
                     pass
                 return False, remote_user, None
 
-            # Periodic disk-activity check (every 2 s)
             current_time = time.time()
             if current_time - last_disk_check >= 2.0:
                 last_disk_check = current_time
@@ -912,7 +945,6 @@ def run_sockseek(
                         size_increased = True
                     last_file_sizes[path] = current_size
 
-                # Update displayed file size — new files only, not pre-existing ones
                 new_files = {
                     p: sz for p, sz in active_files.items()
                     if p not in initial_file_set or p.endswith('.incomplete')
@@ -924,7 +956,6 @@ def run_sockseek(
                     last_activity = current_time
                     state.update_fields(last_tx_time=current_time)
 
-            # Read one character at a time from subprocess stdout
             rlist, _, _ = select.select([process.stdout.fileno()], [], [], 0.05)
 
             if process.stdout.fileno() in rlist:
@@ -941,7 +972,6 @@ def run_sockseek(
                         state.log(f"[grey37]  ↳  {clean_line}[/grey37]")
                         lower_line = clean_line.lower()
 
-                        # Parse byte progress ("5.1 MB / 10.2 MB")
                         size_match = re.search(
                             r"(\d+(?:\.\d+)?)\s*([KMG]?B)\s*/\s*(\d+(?:\.\d+)?)\s*([KMG]?B)",
                             clean_line, re.IGNORECASE,
@@ -968,7 +998,6 @@ def run_sockseek(
                             except Exception:
                                 pass
 
-                        # Extract remote username and file path
                         possible_path = None
                         if "songjob:" in lower_line:
                             m = re.search(r"SongJob:.*?:.*?: (.*)", clean_line)
@@ -986,7 +1015,6 @@ def run_sockseek(
                                 remote_user = rel_path.split(os.sep)[0]
                                 state.update_fields(remote_user=remote_user)
 
-                        # Queue timeout logic
                         if "queued" in lower_line:
                             if queued_start_time is None:
                                 queued_start_time = time.time()
@@ -1023,7 +1051,6 @@ def run_sockseek(
         return False, None, None
 
     finally:
-        # Clean up any partial .incomplete files on failure
         if not job_succeeded:
             time.sleep(0.5)
             incomplete_paths = []
@@ -1051,71 +1078,68 @@ def run_sockseek(
 
 
 # ─────────────────────────────────────────────
-#  Entry point
+#  Entry Point
 # ─────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Download Spotify Playlist Tracks via local sockseek.")
-    parser.add_argument("friendly_name", help="Friendly name of the Spotify list as defined in spotify_lists.txt")
-    parser.add_argument("--download", action="store_true", help="Trigger downloads")
-    parser.add_argument("--dev",      action="store_true", help="Dev mode: top 5 tracks only")
+    parser = argparse.ArgumentParser(description="Download Spotify Liked Tracks via local sockseek.")
+    parser.add_argument("--download",      action="store_true", help="Trigger downloads of pending/failed tracks")
+    parser.add_argument("--dev",           action="store_true", help="Dev mode: fetch/process top 5 tracks only")
+    parser.add_argument("--retry-failed",  action="store_true", help="Include previously failed tracks when downloading")
+    parser.add_argument("--sync-only",     action="store_true", help="Only sync Spotify Liked tracks to DB without downloading")
+    parser.add_argument("--dest-dir",      default=DEFAULT_DEST, help=f"Destination directory for downloads (default: {DEFAULT_DEST})")
     args = parser.parse_args()
 
-    init_db()
+    init_liked_db()
+    log_event(f"[bold cyan]▶️  Run started for Spotify Liked Tracks (dev_mode={args.dev}, download={args.download})[/bold cyan]")
 
-    lists_map = read_spotify_lists()
-    if not lists_map:
-        console.print("[bold red]❌  spotify_lists.txt not found or empty.[/]")
-        log_event("[bold red]❌  spotify_lists.txt not found or empty. Aborting run.[/bold red]")
-        sys.exit(1)
+    # 1. Fetch liked tracks from Spotify API
+    spotify_tracks = fetch_spotify_liked_tracks(dev_mode=args.dev)
 
-    friendly_key = args.friendly_name.lower()
-    if friendly_key not in lists_map:
-        choices = ", ".join(m[1] for m in lists_map.values())
-        console.print(f"[bold red]❌ Unknown playlist friendly name '{args.friendly_name}'.[/] Choose from: [cyan]{choices}[/]")
-        log_event(f"[bold red]❌  Unknown playlist friendly name '{args.friendly_name}'. Aborting run.[/bold red]")
-        sys.exit(1)
+    if spotify_tracks:
+        total_in_db, new_added = sync_liked_tracks_to_db(spotify_tracks)
+        console.print(f"[dim]DB sync complete: {total_in_db} total tracks in DB ({new_added} newly added).[/dim]")
+        log_event(f"[cyan]DB sync: {total_in_db} total in DB, {new_added} new added.[/cyan]")
 
-    spotify_url, friendly_display = lists_map[friendly_key]
-
-    # From here on, every log line is tagged with this playlist/genre name.
-    global _CURRENT_GENRE
-    _CURRENT_GENRE = friendly_display
-    log_event(f"[bold cyan]▶️  Run started for '{friendly_display}'  (dev_mode={args.dev}, download={args.download})[/bold cyan]")
-
-    # Fetch track list before launching TUI
-    console.print(f"[bold magenta]🎵  Fetching Spotify Playlist '{friendly_display}'…[/]")
-    log_event(f"[cyan]🎵  Fetching Spotify playlist '{friendly_display}'…[/cyan]")
-    tracks = get_spotify_playlist_tracks(spotify_url)
-    if not tracks:
-        console.print("[bold red]No tracks found.[/]")
-        log_event("[bold red]❌  No tracks found in playlist. Aborting run.[/bold red]")
-        return
-    if args.dev:
-        tracks = tracks[:5]
-
-    db_ok, db_fail = get_db_stats()
+    db_stats = get_liked_db_stats()
     console.print(
-        f"[dim]DB history: {db_ok} successful · {db_fail} failed  "
-        f"|  Tracks loaded: {len(tracks)}[/dim]"
+        f"[dim]DB Statistics — Total: {db_stats['total']} | Success: {db_stats['success']} | "
+        f"Failed: {db_stats['failed']} | Pending: {db_stats['pending']} | Skipped: {db_stats['skipped']}[/dim]"
     )
 
-    # ── Shared state ─────────────────────────────────────────────────────
+    if args.sync_only:
+        console.print("[bold green]✅  Sync complete (--sync-only specified). Exiting.[/]")
+        return
+
+    # 2. Get tracks that require downloading
+    pending_tracks = get_tracks_for_download(retry_failed=args.retry_failed)
+
+    if args.dev and pending_tracks:
+        pending_tracks = pending_tracks[:5]
+
+    if not pending_tracks:
+        console.print("[bold green]✨ All liked tracks are already downloaded! No pending tracks to process.[/]")
+        log_event("[bold green]✨ All liked tracks already downloaded. No pending tracks.[/bold green]")
+        return
+
+    # 3. Setup Shared State
     state = TrackState(
-        genre=friendly_display,
-        total_tracks=len(tracks),
+        genre="Spotify Liked",
+        total_tracks=len(pending_tracks),
         dev_mode=args.dev,
+        already_owned=db_stats['success'],
     )
 
     downloaded_sizes         = []
     newly_downloaded_artists = []
 
-    # ── Download worker ───────────────────────────────────────────────────
+    # 4. Worker thread for downloading
     def worker():
-        for i, t in enumerate(tracks, 1):
+        for i, t in enumerate(pending_tracks, 1):
             if state.quit_requested:
                 break
 
+            sid    = t['spotify_id']
             artist = t['artist']
             title  = t['title']
             remix  = t['remix']
@@ -1135,12 +1159,6 @@ def main():
                 skip_requested=False,
             )
 
-            # DB check
-            if track_exists(artist, title, remix, friendly_display):
-                state.log(f"[blue]💾  {tag} {artist} — {title}  [dim](already in DB)[/dim][/blue]")
-                state.update_fields(status="owned", already_owned=state.already_owned + 1)
-                continue
-
             if args.download:
                 track_start = time.time()
                 state.update_fields(track_start_time=track_start)
@@ -1148,16 +1166,15 @@ def main():
                 state.log(f"[cyan]🔍  {tag} Searching: {artist} — {title}[/cyan]")
 
                 success, r_user, f_path = run_sockseek(
-                    artist, title, remix, friendly_display, state, track_start,
+                    artist, title, remix, args.dest_dir, state, track_start,
                 )
-                add_to_db(artist, title, remix, friendly_display, r_user, success)
 
                 was_skipped = state.skip_requested
                 state.update_fields(skip_requested=False)
-
                 el = elapsed_str(track_start)
 
                 if success:
+                    status_str = "success"
                     state.update_fields(downloaded=state.downloaded + 1)
                     newly_downloaded_artists.append(artist)
                     state.log(
@@ -1165,7 +1182,6 @@ def main():
                         f"  [dim]({r_user or '?'}) · {el}[/dim][/bold green]"
                     )
 
-                    # Filesystem settle / path resolution
                     final_path = f_path
                     if final_path and not os.path.exists(final_path):
                         for _ in range(6):
@@ -1174,8 +1190,7 @@ def main():
                                 break
                         if not os.path.exists(final_path):
                             filename  = os.path.basename(final_path)
-                            genre_dir = f"/media/quark/dj/beatport top 100/{friendly_display}"
-                            for root, _, files in os.walk(genre_dir):
+                            for root, _, files in os.walk(args.dest_dir):
                                 if filename in files:
                                     final_path = os.path.join(root, filename)
                                     break
@@ -1184,27 +1199,31 @@ def main():
                         downloaded_sizes.append(os.path.getsize(final_path))
                         state.update_fields(status="converting")
                         final_mp3 = convert_to_mp3(final_path, state)
-                        update_album_tag(final_mp3, friendly_display, state)
+                        update_album_tag(final_mp3, "Spotify Liked Tracks", state)
                         state.update_fields(status="done")
+                        update_track_status(sid, "success", username=r_user, file_path=final_mp3)
                     elif f_path:
                         state.log(f"[bold yellow]⚠️  File missing at: {f_path}[/bold yellow]")
+                        update_track_status(sid, "failed", username=r_user, error="File missing after download")
                     else:
-                        state.log("[bold red]⚠️  Could not determine file path.[/bold red]")
+                        update_track_status(sid, "failed", username=r_user, error="Could not determine download file path")
 
                 elif was_skipped:
                     state.update_fields(status="skipped", skipped=state.skipped + 1)
                     state.log(f"[yellow]⏩  {tag} {artist} — {title}  [dim]Skipped · {el}[/dim][/yellow]")
+                    update_track_status(sid, "skipped", username=r_user, error="User skipped")
                 else:
                     state.update_fields(status="failed", failed=state.failed + 1)
                     state.log(f"[bold red]❌  {tag} {artist} — {title}  [dim]Failed · {el}[/dim][/bold red]")
+                    update_track_status(sid, "failed", username=r_user, error="Download failed or timed out")
 
             else:
                 state.log(
-                    f"[yellow]🔍  {tag} {artist} — {title}  [dim](missing, --download not set)[/dim][/yellow]"
+                    f"[yellow]🔍  {tag} {artist} — {title}  [dim](pending, --download not set)[/dim][/yellow]"
                 )
                 state.update_fields(status="failed", failed=state.failed + 1)
 
-            # Brief inter-track pause (2 s), interruptible by skip/quit
+            # Brief inter-track pause (2 s), interruptible
             for _ in range(20):
                 if state.skip_requested or state.quit_requested:
                     break
@@ -1212,21 +1231,21 @@ def main():
 
         state.done = True
 
-    # ── Launch ────────────────────────────────────────────────────────────
+    # 5. Launch Textual UI
     worker_thread = threading.Thread(target=worker, daemon=True)
     worker_thread.start()
 
-    SpotifyApp(state).run()
+    SpotifyLikedApp(state).run()
 
     worker_thread.join(timeout=5.0)
 
-    # ── Post-run stats (printed after TUI exits) ──────────────────────────
+    # 6. Post-run stats & Pushover notification
     if downloaded_sizes:
         total_b = sum(downloaded_sizes)
         table   = Table(
-            title="[bold cyan]Download Statistics[/]",
+            title="[bold green]Download Statistics[/]",
             box=box.ROUNDED,
-            header_style="bold blue",
+            header_style="bold green",
         )
         table.add_column("Metric", style="dim")
         table.add_column("Value", justify="right")
@@ -1242,19 +1261,19 @@ def main():
 
     unique_artists = sorted(set(newly_downloaded_artists))
     msg = (
-        f"Run complete for {friendly_display}.\n"
-        f"• Total: {state.total_tracks} | Downloaded: {state.downloaded}\n"
-        f"• Failed: {state.failed} | Skipped: {state.skipped} | Owned: {state.already_owned}"
+        f"Run complete for Spotify Liked Tracks.\n"
+        f"• Total Pending: {state.total_tracks} | Downloaded: {state.downloaded}\n"
+        f"• Failed: {state.failed} | Skipped: {state.skipped} | Already Owned: {state.already_owned}"
     )
     if unique_artists:
         suffix = "…" if len(unique_artists) > 12 else ""
         msg += f"\n\nNew Artists: {', '.join(unique_artists[:12])}{suffix}"
 
-    send_pushover_notification(f"Soulseek Rinser: {friendly_display}", msg)
-    console.print(f"\n[bold green]✅  All tracks processed for {friendly_display}.[/]")
+    send_pushover_notification("Soulseek Rinser: Spotify Liked Tracks", msg)
+    console.print(f"\n[bold green]✅  All liked tracks processed.[/]")
     log_event(
-        f"[bold green]✅  Run complete for '{friendly_display}'. "
-        f"Total={state.total_tracks} Downloaded={state.downloaded} "
+        f"[bold green]✅  Run complete. "
+        f"TotalPending={state.total_tracks} Downloaded={state.downloaded} "
         f"Failed={state.failed} Skipped={state.skipped} Owned={state.already_owned}[/bold green]"
     )
 

@@ -21,6 +21,10 @@ LASTFM_API_KEY = _getenv("LASTFM_API_KEY", "last fm api key")
 
 FLARESOLVERR_URL = _getenv("FLARESOLVERR_URL", "http://docker:8191/v1")
 
+SPOTIFY_CLIENT_ID = _getenv("SPOTIFY_CLIENT_ID", "your spotify client id")
+SPOTIFY_CLIENT_SECRET = _getenv("SPOTIFY_CLIENT_SECRET", "your spotify client secret")
+SPOTIFY_REDIRECT_URI = _getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:9090")
+
 
 def create_slskd_client() -> SlskdClient:
     """Create a Slskd client using the shared configuration."""
