@@ -1199,7 +1199,8 @@ def main():
                         downloaded_sizes.append(os.path.getsize(final_path))
                         state.update_fields(status="converting")
                         final_mp3 = convert_to_mp3(final_path, state)
-                        update_album_tag(final_mp3, "Spotify Liked Tracks", state)
+                        album_to_tag = t.get("album") or "Spotify Liked Tracks"
+                        update_album_tag(final_mp3, album_to_tag, state)
                         state.update_fields(status="done")
                         update_track_status(sid, "success", username=r_user, file_path=final_mp3)
                     elif f_path:
